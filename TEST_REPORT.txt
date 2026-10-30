@@ -1,0 +1,4 @@
+Python syntax: PASS
+Isolated dispatch/parser regression cases: 6 PASS
+Parallel configuration 16/8: preserved
+Live Docker/Windows/PostgreSQL/provider acceptance: NOT RUN

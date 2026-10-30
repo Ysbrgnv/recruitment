@@ -1,0 +1,9 @@
+{
+  "name": "recruitment-native-browser",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {"node": ">=20"},
+  "dependencies": {"playwright": "1.58.0"},
+  "scripts": {"start": "node server.cjs", "install-browser": "playwright install chromium"}
+}
+

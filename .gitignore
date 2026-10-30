@@ -1,0 +1,49 @@
+# Секреты и локальная конфигурация
+.env
+.env.*
+!.env.example
+docker.local.env
+**/docker.local.env
+
+# Секреты и runtime-файлы
+deploy/
+logs/
+backups/
+
+# Базы и резервные копии
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+*.bak
+
+# Логи и временные файлы
+*.log
+*.lock
+*.tmp
+*~
+*.before-transfer-fix
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+
+# Архивы и выгрузки проекта
+*.zip
+PROJECT_FULL*.txt
+project_structure_and_code*.txt
+
+# IDE и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
