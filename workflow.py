@@ -21,11 +21,15 @@ def _metrics():
 def _task_ops(task_id):
     with database() as con:return [ops.decode(x) for x in con.execute('SELECT * FROM operations WHERE task_id=? ORDER BY updated',(task_id,))]
 
+def _delivery_eligible(item):
+    return isinstance(item,dict) and isinstance(item.get('evaluation'),dict) and item['evaluation'].get('structured') is True
+
 def _sync_metrics(task_id,metrics):
     operations=_task_ops(task_id)
     ai=[x for x in operations if x['kind']=='ai']
-    good=[x for x in ai if x['state']=='succeeded']
-    metrics.update(ai_requested=len(ai),successful_responses=len(good),structured=sum(bool(x['data'].get('evaluation',{}).get('structured')) for x in good),manual_review=sum(x['state'] in {'failed','skipped'} or (x['state']=='succeeded' and not x['data'].get('evaluation',{}).get('structured')) for x in ai))
+    completed=[x for x in ai if x['state']=='succeeded']
+    good=[x for x in completed if _delivery_eligible(x['data'])]
+    metrics.update(ai_requested=len(ai),successful_responses=len(good),structured=len(good),manual_review=sum(x['state'] in {'failed','skipped'} or (x['state']=='succeeded' and not _delivery_eligible(x['data'])) for x in ai))
     mail=[x for x in operations if x['kind']=='hh_email']
     metrics.update(emails_sent=sum(x['state']=='succeeded' and x['data'].get('status')=='Sent' for x in mail),emails_failed=sum(x['state'] in {'failed','unknown'} for x in mail))
     return good
@@ -117,19 +121,25 @@ def run_hh_steps(task_id,progress,staged=False):
         except Exception as exc:
             ops.finish(oid,'unknown',{'resume_id':rid,'error':str(exc)})
             update_tracking(rid,task['vacancy_id'],'OutcomeUnknown','Unknown',None,'Not evaluated','Not sent',str(exc));pause(task_id)
-        # Commit answer before any email. Failure here leaves sending => manual recovery, never repeat.
+        # Commit every completed AI answer before the delivery gate. Invalid evaluations are preserved and never retried automatically.
         ops.finish(oid,'succeeded',item)
-        update_tracking(rid,task['vacancy_id'],'Succeeded','Structured' if item['evaluation'].get('structured') else 'Raw text',item['evaluation'].get('total'),item['evaluation'].get('level'),'Pending',response_received_at=datetime.now(),result=item)
+        update_tracking(rid,task['vacancy_id'],'Succeeded','Structured' if _delivery_eligible(item) else 'Raw text',item['evaluation'].get('total'),item['evaluation'].get('level'),'Pending' if _delivery_eligible(item) else 'Not sent',response_received_at=datetime.now(),result=item)
+        if not _delivery_eligible(item):
+            _sync_metrics(task_id,metrics);cp['metrics']=metrics;update_task(task_id,checkpoint=cp)
+            progress('candidate_done','Оценка ИИ сохранена для ручной проверки; письмо не отправлено',service._progress_payload(metrics,target,task['requested_count']))
+            yield 'ai' if staged else None
+            continue
         if staged:yield 'mail'
         status=_hh_mail(task,vacancy,item)
-        update_tracking(rid,task['vacancy_id'],'Succeeded','Structured' if item['evaluation'].get('structured') else 'Raw text',item['evaluation'].get('total'),item['evaluation'].get('level'),status,email_event_at=datetime.now(),result=item)
+        update_tracking(rid,task['vacancy_id'],'Succeeded','Structured',item['evaluation'].get('total'),item['evaluation'].get('level'),status,email_event_at=datetime.now(),result=item)
         _sync_metrics(task_id,metrics);cp['metrics']=metrics;update_task(task_id,checkpoint=cp)
         progress('candidate_done','Кандидат обработан',service._progress_payload(metrics,target,task['requested_count']))
         yield 'ai' if staged else None
     good=_sync_metrics(task_id,metrics)
     metrics['shortfall']=max(0,task['requested_count']-len(good))
     if metrics['shortfall']:metrics['shortfall_reason']='Сохранённый пул исчерпан или кандидаты пропущены после ручной проверки.'
-    items=[x['data'] for x in good];manual=[x for x in items if not x['evaluation'].get('structured')]
+    items=[x['data'] for x in good]
+    manual=[x['data'] for x in _task_ops(task_id) if x['kind']=='ai' and x['state']=='succeeded' and not _delivery_eligible(x['data'])]
     return {'mode':'hh','vacancy_id':task['vacancy_id'],'requested_count':task['requested_count'],'target_pool':target,'query':task['query'],'considered':len(good),'evaluated':[x for x in items if x['evaluation'].get('structured')],'manual_review':manual,'metrics':metrics,'mail_status':f"Писем отправлено: {metrics['emails_sent']}; ошибок: {metrics['emails_failed']}"}
 
 def run_xray(task_id,progress):

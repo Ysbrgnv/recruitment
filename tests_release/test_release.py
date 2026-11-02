@@ -51,7 +51,91 @@ class WorkflowTests(unittest.TestCase):
         state.create_task('t','v',2,'test@example.com','hh')
         vacancy={'id':'v','name':'test'};pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[])]
         state.update_task('t',query='test',checkpoint={'vacancy':vacancy,'pool':pool,'pool_complete':True})
-    def item(self,v,r,n,notes):return {'resume_id':r['id'],'number':n,'evaluation':{'structured':True,'total':50,'level':'test'},'evaluation_text':'test'}
+    def item(self,v,r,n,notes):return {'resume_id':r['id'],'number':n,'evaluation':{'structured':True,'human_review_required':True,'total':50,'level':'test','gaps':[]},'evaluation_text':'test'}
+    def invalid_item(self,v,r,n,notes,status='invalid_response'):
+        return {'resume_id':r['id'],'number':n,'evaluation':{'structured':False,'human_review_required':True,'status':status,'total':None,'level':'Требуется ручная проверка','gaps':[]},'evaluation_text':'invalid'}
+    def set_requested(self,count,pool=None):
+        task=state.get_task('t');checkpoint=task['checkpoint']
+        if pool is not None:checkpoint={**checkpoint,'pool':pool}
+        state.update_task('t',requested_count=count,checkpoint=checkpoint)
+    def test_structured_evaluation_is_emailed(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.item),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once();self.assertEqual(result['metrics']['successful_responses'],1)
+    def test_unstructured_evaluation_is_saved_not_emailed_and_search_continues(self):
+        self.set_requested(1)
+        calls=[]
+        def build(v,r,n,notes):
+            calls.append(r['id'])
+            return self.invalid_item(v,r,n,notes) if r['id']=='r1' else self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,['r1','r2']);mail.assert_called_once()
+        self.assertEqual(ops.get_op('t','ai','r1')['state'],'succeeded')
+        self.assertIsNone(ops.get_op('t','hh_email','r1'))
+        self.assertEqual(result['metrics']['successful_responses'],1);self.assertEqual(result['metrics']['manual_review'],1)
+        self.assertEqual([x['resume_id'] for x in result['manual_review']],['r1'])
+    def test_unstructured_evaluation_does_not_fill_requested_count(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.invalid_item),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['successful_responses'],0)
+        self.assertEqual(result['metrics']['shortfall'],1)
+    def test_processing_continues_after_unstructured_evaluation(self):
+        self.set_requested(1)
+        calls=[]
+        def build(v,r,n,notes):
+            calls.append(r['id'])
+            return self.invalid_item(v,r,n,notes) if r['id']=='r1' else self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,['r1','r2']);mail.assert_called_once()
+    def test_malformed_ai_result_is_not_emailed(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=lambda v,r,n,notes:self.invalid_item(v,r,n,notes,'invalid_response')),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(ops.get_op('t','ai','r1')['state'],'succeeded')
+        self.assertEqual(result['metrics']['successful_responses'],0);self.assertEqual(result['metrics']['shortfall'],1)
+    def test_human_review_required_does_not_block_email(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.item),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once()
+    def test_low_score_does_not_block_email(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        def low(v,r,n,notes):
+            item=self.item(v,r,n,notes);item['evaluation'].update(total=0,level='Ключевые требования преимущественно не подтверждены');return item
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=low),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once()
+    def test_gaps_do_not_block_email(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        def with_gaps(v,r,n,notes):
+            item=self.item(v,r,n,notes);item['evaluation']['gaps']=['Не подтверждено'];return item
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=with_gaps),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once()
+    def test_legacy_evaluation_without_structured_is_not_emailed(self):
+        self.set_requested(1,pool=[])
+        legacy={'resume_id':'legacy','number':1,'evaluation':{'total':50,'level':'legacy'},'evaluation_text':'legacy'}
+        oid=ops.begin('t','ai','legacy');ops.finish(oid,'succeeded',legacy)
+        with patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertIsNone(ops.get_op('t','hh_email','legacy'))
+        self.assertEqual(result['metrics']['successful_responses'],0);self.assertEqual(result['metrics']['shortfall'],1)
+    def test_existing_succeeded_email_is_not_repeated(self):
+        item=self.item(None,{'id':'r1'},1,[])
+        oid=ops.begin('t','hh_email','r1',{'item':item});ops.finish(oid,'succeeded',{'status':'Sent'})
+        with patch.object(workflow,'send_candidate_email') as mail:
+            self.assertEqual(workflow._hh_mail(state.get_task('t'),{'name':'test'},item),'Sent')
+        mail.assert_not_called()
+    def test_existing_unknown_email_is_not_repeated(self):
+        item=self.item(None,{'id':'r1'},1,[])
+        oid=ops.begin('t','hh_email','r1',{'item':item});ops.finish(oid,'unknown',{'item':item})
+        with patch.object(workflow,'send_candidate_email') as mail:
+            with self.assertRaises(workflow.NeedsManual):workflow._hh_mail(state.get_task('t'),{'name':'test'},item)
+        mail.assert_not_called();self.assertEqual(ops.get_op('t','hh_email','r1')['state'],'unknown')
     def test_same_task_resume_no_duplicate_ai_or_mail(self):
         calls=[]
         def build(v,r,n,notes):
