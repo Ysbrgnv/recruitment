@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch,Mock
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
+import settings as real_settings
 TEMP=tempfile.TemporaryDirectory()
 os.environ['RECRUITMENT_DB_PATH']=str(Path(TEMP.name)/'test.db')
 os.environ.pop('DATABASE_URL',None)
@@ -13,7 +14,7 @@ settings.BASE_DIR=Path(TEMP.name);settings.MAX_BACKGROUND_WORKERS=1
 settings.TASK_RETENTION_HOURS=24;settings.RESERVATION_STALE_MINUTES=30
 sys.modules['settings']=settings
 import app_state,operation_store as ops,tracking_service,browser_screen
-
+sys.modules['settings']=real_settings
 def isolated_functions(name,names):
     tree=ast.parse((ROOT/name).read_text())
     nodes=[]

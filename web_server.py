@@ -337,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/tasks/([0-9a-f]{32})/resolve", path)
         if match:
             data=self.read_json()
-            try:operations.resolve(match.group(1),str(data.get('operation_id') or ''),str(data.get('action') or ''),str(data.get('reason') or ''))
+            try:operations.resolve(match.group(1),str(data.get('operation_id') or ''),str(data.get('action') or ''),str(data.get('reason') or ''),actor_session=identity(self.headers))
             except ValueError as exc:return self.send_json({'error':str(exc)},409)
             return self.send_json({'ok':True})
         match = re.fullmatch(r"/api/tasks/([0-9a-f]{32})/resume", path)
@@ -475,4 +475,3 @@ def start_server():
         server.server_close()
         retention_stop.set()
         retention_thread.join(timeout=2)
-

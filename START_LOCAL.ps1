@@ -20,11 +20,11 @@ Run-Docker "Stopping application writers" ($compose+@("stop","web","worker-gener
 Run-Docker "Starting PostgreSQL" ($compose+@("up","-d","--no-build","--wait","--wait-timeout","180","db"))
 $tableCount=& docker @compose exec -T db psql -U postgres -d recruitment -Atc "SELECT COUNT(*) FROM pg_tables WHERE schemaname='public'"
 if ($LASTEXITCODE -ne 0) { throw "Cannot inspect PostgreSQL schema." }
-if ($tableCount.Trim() -eq "0") { Run-Docker "Bootstrapping database" ($compose+@("--profile","admin","run","--rm","--no-deps","bootstrap")) }
+Write-Host "PostgreSQL public table count before bootstrap: $($tableCount.Trim())"
+Run-Docker "Bootstrapping database" ($compose+@("--profile","admin","run","--rm","--no-deps","bootstrap"))
 Run-Docker "Synchronizing runtime configuration" ($compose+@("up","--no-build","--force-recreate","--no-color","init-config"))
 Run-Docker "Starting services" ($compose+@("up","-d","--no-build","--force-recreate","--wait","--wait-timeout","240","browser","web","worker-general","worker-browser"))
 Run-Docker "Testing browser isolation" ($compose+@("run","--rm","--no-deps","web","smoke-browser"))
 Run-Docker "Displaying service status" ($compose+@("ps"))
 Write-Host "`nREADY: http://localhost:8765" -ForegroundColor Green
 Write-Host "Parallelism: HH=16, X-Ray=8. Existing database and rotated HH tokens are preserved on the next START_LOCAL run."
-

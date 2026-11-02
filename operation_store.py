@@ -5,6 +5,7 @@ from app_state import database,get_task,update_task
 def init():
     import os
     if os.getenv('APP_SCHEMA_MANAGED')=='true':return
+    postgres=bool(os.getenv('DATABASE_URL','').strip())
     with database() as con:
         con.executescript("""
         CREATE TABLE IF NOT EXISTS operations(
@@ -13,11 +14,18 @@ def init():
           updated REAL NOT NULL, UNIQUE(task_id,kind,item_key));
         CREATE TABLE IF NOT EXISTS resolution_audit(
           id INTEGER PRIMARY KEY, operation_id TEXT, task_id TEXT,
-          action TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL);
+          action TEXT NOT NULL, reason TEXT NOT NULL, created REAL NOT NULL,
+          actor_session TEXT);
         CREATE TABLE IF NOT EXISTS xray_history(
           vacancy_id TEXT NOT NULL,url TEXT NOT NULL,task_id TEXT NOT NULL,
           status TEXT NOT NULL,updated REAL NOT NULL,PRIMARY KEY(vacancy_id,url));
         """)
+        if postgres:
+            con.execute('ALTER TABLE resolution_audit ADD COLUMN IF NOT EXISTS actor_session TEXT')
+        else:
+            columns={row['name'] for row in con.execute('PRAGMA table_info(resolution_audit)').fetchall()}
+            if 'actor_session' not in columns:
+                con.execute('ALTER TABLE resolution_audit ADD COLUMN actor_session TEXT')
 
 def decode(row):
     if not row:return None
@@ -75,8 +83,11 @@ def recover():
             runnable.append(tid)
     return runnable
 
-def resolve(task_id,oid,action,reason):
+def resolve(task_id,oid,action,reason,actor_session=None):
+    import re
     if not isinstance(reason,str) or not reason.strip():raise ValueError('Укажите основание ручного решения.')
+    if actor_session is not None and (not isinstance(actor_session,str) or not re.fullmatch('[a-f0-9]{64}',actor_session)):
+        raise ValueError('Некорректный идентификатор сессии.')
     with database() as con:
         con.execute('BEGIN IMMEDIATE')
         row=con.execute("SELECT * FROM operations WHERE id=? AND task_id=? AND state='unknown'",(oid,task_id)).fetchone()
@@ -87,7 +98,7 @@ def resolve(task_id,oid,action,reason):
         data=json.loads(row['data'])
         if action=='confirm_sent':data['status']='Sent';data['manually_confirmed']=True
         con.execute('UPDATE operations SET state=?,data=?,updated=? WHERE id=?',(state,json.dumps(data,ensure_ascii=False,default=str),time.time(),oid))
-        con.execute('INSERT INTO resolution_audit(operation_id,task_id,action,reason,created) VALUES(?,?,?,?,?)',(oid,task_id,action,reason.strip(),time.time()))
+        con.execute('INSERT INTO resolution_audit(operation_id,task_id,action,reason,created,actor_session) VALUES(?,?,?,?,?,?)',(oid,task_id,action,reason.strip(),time.time(),actor_session))
         task_row=con.execute('SELECT vacancy_id FROM tasks WHERE id=?',(task_id,)).fetchone()
         if row['kind'] in {'ai','legacy_ai'}:
             status='RetryAllowed' if action=='retry' else 'OutcomeUnknown'

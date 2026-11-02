@@ -286,6 +286,102 @@ class OperationFinishFencingTests(unittest.TestCase):
         self.assertFalse(any(statement.startswith('update operations set state=') for statement in sql),
                          'A stale worker must be rejected before UPDATE operations')
 
+class UnknownResolutionActorAuditTests(unittest.TestCase):
+    TASK_ID='a'*32
+    COOKIE_A='a'*64
+    COOKIE_B='b'*64
+
+    def setUp(self):
+        import hashlib
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.db_patch=patch.object(state,'DB_PATH',Path(self.tmp.name)/'actor-audit.db')
+        self.db_patch.start();self.addCleanup(self.db_patch.stop)
+        state.init_db();ops.init()
+        state.create_task(self.TASK_ID,'vacancy-actor',1,'owner@example.com','hh')
+        self.actor_a=hashlib.sha256(self.COOKIE_A.encode()).hexdigest()
+        self.actor_b=hashlib.sha256(self.COOKIE_B.encode()).hexdigest()
+        state.update_task(self.TASK_ID,owner_session=self.actor_a,status='waiting_manual',stage='manual_resolution')
+
+    def add_unknown(self,kind='ai',key='candidate-1'):
+        oid=ops.begin(self.TASK_ID,kind,key)
+        ops.finish(oid,'unknown',{'error':'outcome unknown'})
+        return oid
+
+    def audit_rows(self):
+        with state.database() as con:
+            return [dict(row) for row in con.execute('SELECT * FROM resolution_audit ORDER BY id').fetchall()]
+
+    def operation_state(self,kind='ai',key='candidate-1'):
+        return ops.get_op(self.TASK_ID,kind,key)['state']
+
+    def post_resolve(self,cookie,oid,action='skip',reason='Reviewed external outcome'):
+        import asgi_app
+        body=json.dumps({'operation_id':oid,'action':action,'reason':reason}).encode()
+        response=asgi_app.dispatch('POST',f'/api/tasks/{self.TASK_ID}/resolve',[
+            (b'content-type',b'application/json'),
+            (b'cookie',f'task_session={cookie}'.encode()),
+        ],body)
+        return response
+
+    def test_owner_session_is_written_to_resolution_audit(self):
+        oid=self.add_unknown()
+        response=self.post_resolve(self.COOKIE_A,oid)
+        self.assertEqual(response.status_code,200)
+        rows=self.audit_rows();self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['actor_session'],self.actor_a)
+
+    def test_foreign_session_is_forbidden_without_operation_or_audit_change(self):
+        oid=self.add_unknown()
+        response=self.post_resolve(self.COOKIE_B,oid)
+        self.assertEqual(response.status_code,403)
+        self.assertEqual(self.operation_state(),'unknown')
+        self.assertEqual(self.audit_rows(),[])
+
+    def test_audit_contains_hash_and_never_raw_cookie(self):
+        oid=self.add_unknown()
+        response=self.post_resolve(self.COOKIE_A,oid)
+        self.assertEqual(response.status_code,200)
+        row=self.audit_rows()[0]
+        self.assertEqual(row['actor_session'],self.actor_a)
+        self.assertNotEqual(row['actor_session'],self.COOKIE_A)
+        self.assertNotIn(self.COOKIE_A,json.dumps(row,ensure_ascii=False))
+
+    def test_repeated_resolution_is_rejected_without_duplicate_audit(self):
+        oid=self.add_unknown()
+        first=self.post_resolve(self.COOKIE_A,oid)
+        self.assertEqual(first.status_code,200)
+        original=self.audit_rows();self.assertEqual(len(original),1)
+        second=self.post_resolve(self.COOKIE_A,oid)
+        self.assertEqual(second.status_code,409)
+        self.assertEqual(self.audit_rows(),original)
+
+    def test_backend_resolve_persists_actor_with_operation_in_one_transaction(self):
+        oid=self.add_unknown()
+        ops.resolve(self.TASK_ID,oid,'skip','Backend actor test',actor_session=self.actor_a)
+        self.assertEqual(self.operation_state(),'skipped')
+        rows=self.audit_rows();self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['operation_id'],oid)
+        self.assertEqual(rows[0]['task_id'],self.TASK_ID)
+        self.assertEqual(rows[0]['actor_session'],self.actor_a)
+
+    def test_backend_resolve_rolls_back_operation_when_audit_insert_fails(self):
+        import sqlite3
+        oid=self.add_unknown()
+        with state.database() as con:
+            con.execute("""CREATE TRIGGER reject_resolution_audit
+                BEFORE INSERT ON resolution_audit
+                BEGIN SELECT RAISE(ABORT,'injected audit failure'); END""")
+        with self.assertRaises(sqlite3.DatabaseError):
+            ops.resolve(self.TASK_ID,oid,'skip','Atomic audit test',actor_session=self.actor_a)
+        self.assertEqual(self.operation_state(),'unknown')
+        self.assertEqual(self.audit_rows(),[])
+
+    def test_backend_resolve_without_actor_remains_compatible_and_stores_null(self):
+        oid=self.add_unknown()
+        ops.resolve(self.TASK_ID,oid,'skip','Administrative compatibility')
+        rows=self.audit_rows();self.assertEqual(len(rows),1)
+        self.assertIsNone(rows[0]['actor_session'])
+
 class HHTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
