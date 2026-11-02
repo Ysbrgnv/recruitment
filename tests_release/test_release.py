@@ -187,6 +187,105 @@ print('NEW_PROCESS_NO_RESEND_VERIFIED')
         self.assertTrue(ops.reserve_and_begin_ai('new','r1','v','v','','test@example.com'))
         with state.database() as c:self.assertEqual(ops.allow_confirmed_unsent_retries('t',c),0)
 
+class OperationFinishFencingTests(unittest.TestCase):
+    class Cursor:
+        def __init__(self,row=None,rowcount=0):self.row=row;self.rowcount=rowcount
+        def fetchone(self):return self.row
+        def fetchall(self):return [] if self.row is None else [self.row]
+
+    class Database:
+        def __init__(self,operations,jobs,fail_update=False):
+            self.operations=operations;self.jobs=jobs;self.fail_update=fail_update
+            self.events=[];self.snapshot=None
+        def __enter__(self):
+            import copy
+            self.snapshot=copy.deepcopy((self.operations,self.jobs));return self
+        def __exit__(self,exc_type,exc,tb):
+            if exc_type:
+                operations,jobs=self.snapshot
+                self.operations.clear();self.operations.update(operations)
+                self.jobs.clear();self.jobs.update(jobs)
+            return False
+        def execute(self,sql,params=()):
+            normalized=' '.join(sql.lower().split());self.events.append((normalized,params))
+            if normalized=='begin immediate':return OperationFinishFencingTests.Cursor()
+            if normalized.startswith('select') and ' from operations ' in normalized:
+                row=self.operations.get(params[0]);return OperationFinishFencingTests.Cursor(dict(row) if row else None)
+            if normalized.startswith('select') and ' from task_jobs ' in normalized:
+                row=self.jobs.get(params[0]);owned=row and row['owner']==params[1] and row['state']=='running'
+                return OperationFinishFencingTests.Cursor(dict(row) if owned else None)
+            if normalized.startswith('update operations set state='):
+                state,data,updated,oid=params
+                if self.fail_update:raise RuntimeError('injected operation update failure')
+                row=self.operations.get(oid)
+                if row:row.update(state=state,data=data,updated=updated)
+                return OperationFinishFencingTests.Cursor(rowcount=int(row is not None))
+            raise AssertionError('Unexpected SQL: '+sql)
+
+    def setUp(self):
+        self.operations={
+            'ai-op':{'id':'ai-op','task_id':'t','kind':'ai','state':'sending','data':'{}','updated':0},
+            'mail-op':{'id':'mail-op','task_id':'t','kind':'hh_email','state':'sending','data':'{}','updated':0},
+        }
+        self.jobs={7:{'id':7,'task_id':'t','owner':'owner-a','state':'running'}}
+        self.job={'id':7,'task_id':'t','owner':'owner-a','state':'running'}
+
+    def run_finish(self,oid='ai-op',database=None):
+        from transaction_scope import worker_job,bind
+        database=database or self.Database(self.operations,self.jobs)
+        with patch.object(ops,'database',return_value=database),patch.dict(os.environ,TASK_QUEUE_BACKEND='postgres'):
+            with bind(worker_job,self.job):ops.finish(oid,'succeeded',{'result':'saved'})
+        return database
+
+    def test_finish_outside_worker_context_keeps_legacy_behavior(self):
+        from transaction_scope import worker_job,bind
+        database=self.Database(self.operations,self.jobs)
+        with patch.object(ops,'database',return_value=database):
+            with bind(worker_job,None):ops.finish('ai-op','succeeded',{'result':'saved'})
+        self.assertEqual(self.operations['ai-op']['state'],'succeeded')
+
+    def test_finish_with_current_running_owner_succeeds(self):
+        database=self.run_finish()
+        self.assertEqual(self.operations['ai-op']['state'],'succeeded')
+        self.assertTrue(any(' from task_jobs ' in sql for sql,_ in database.events))
+
+    def test_finish_rejects_stale_owner_and_preserves_sending(self):
+        self.jobs[7]['owner']='owner-b';before=dict(self.operations['ai-op'])
+        with self.assertRaisesRegex(RuntimeError,'ownership|owner|fencing'):self.run_finish()
+        self.assertEqual(self.operations['ai-op'],before)
+
+    def test_finish_rejects_job_that_is_not_running(self):
+        self.jobs[7]['state']='pending';before=dict(self.operations['ai-op'])
+        with self.assertRaisesRegex(RuntimeError,'ownership|owner|fencing'):self.run_finish()
+        self.assertEqual(self.operations['ai-op'],before)
+
+    def test_blocked_finish_does_not_store_result_or_allow_retry(self):
+        self.jobs[7]['owner']='owner-b'
+        with self.assertRaises(RuntimeError):self.run_finish()
+        row=self.operations['ai-op']
+        self.assertEqual(row['state'],'sending');self.assertEqual(json.loads(row['data']),{})
+        self.assertNotEqual(row['state'],'retry_allowed')
+
+    def test_ai_and_hh_email_finish_use_the_same_fencing(self):
+        self.jobs[7]['owner']='owner-b'
+        for oid in ('ai-op','mail-op'):
+            with self.subTest(oid=oid):
+                with self.assertRaises(RuntimeError):self.run_finish(oid)
+                self.assertEqual(self.operations[oid]['state'],'sending')
+
+    def test_finish_update_failure_rolls_back_transaction(self):
+        before=dict(self.operations['ai-op']);database=self.Database(self.operations,self.jobs,fail_update=True)
+        with self.assertRaisesRegex(RuntimeError,'injected operation update failure'):self.run_finish(database=database)
+        self.assertEqual(self.operations['ai-op'],before)
+
+    def test_ownership_check_happens_before_operation_update(self):
+        self.jobs[7]['owner']='owner-b';database=self.Database(self.operations,self.jobs)
+        with self.assertRaises(RuntimeError):self.run_finish(database=database)
+        sql=[statement for statement,_ in database.events]
+        self.assertTrue(any(' from task_jobs ' in statement for statement in sql))
+        self.assertFalse(any(statement.startswith('update operations set state=') for statement in sql),
+                         'A stale worker must be rejected before UPDATE operations')
+
 class HHTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -276,4 +375,3 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse((self.root/'deploy').exists())
 
 if __name__=='__main__':unittest.main()
-

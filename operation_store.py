@@ -37,7 +37,15 @@ def begin(task_id,kind,key,data=None, connection=None):
     return oid
 
 def finish(oid,state,data):
-    with database() as con:con.execute('UPDATE operations SET state=?,data=?,updated=? WHERE id=?',(state,json.dumps(data,ensure_ascii=False,default=str),time.time(),oid))
+    import os
+    from transaction_scope import worker_job
+    job=worker_job.get()
+    with database() as con:
+        if job is not None and os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
+            con.execute('BEGIN IMMEDIATE')
+            owned=con.execute("SELECT id FROM task_jobs WHERE id=? AND owner=? AND state='running' FOR UPDATE",(job['id'],job['owner'])).fetchone()
+            if not owned:raise RuntimeError('Operation ownership lost before completion; stale worker result rejected by fencing.')
+        con.execute('UPDATE operations SET state=?,data=?,updated=? WHERE id=?',(state,json.dumps(data,ensure_ascii=False,default=str),time.time(),oid))
 
 def unknowns(task_id):
     with database() as con:
@@ -165,4 +173,3 @@ def allow_confirmed_unsent_retries(task_id,connection):
         con.execute('INSERT INTO resolution_audit(operation_id,task_id,action,reason,created) VALUES(?,?,?,?,?)',(row['id'],task_id,'retry_confirmed_unsent','Explicit task resume; request_sent=False and matching FailedBeforeSend history',time.time()))
         count+=1
     return count
-
