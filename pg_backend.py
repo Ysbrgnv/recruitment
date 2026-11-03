@@ -37,7 +37,7 @@ class Connection:
         sql=re.sub(r'\bREAL\b','DOUBLE PRECISION',sql,flags=re.I)
         sql=sql.replace('id INTEGER PRIMARY KEY','id BIGSERIAL PRIMARY KEY')
         for statement in sql.split(';'):
-            if statement.strip() and not statement.strip().upper().startswith('DROP INDEX'):
+            if statement.strip():
                 self.raw.execute(statement)
 
 @contextmanager

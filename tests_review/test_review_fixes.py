@@ -14,6 +14,7 @@ settings.BASE_DIR=Path(TEMP.name);settings.MAX_BACKGROUND_WORKERS=1
 settings.TASK_RETENTION_HOURS=24;settings.RESERVATION_STALE_MINUTES=30
 sys.modules['settings']=settings
 import app_state,operation_store as ops,tracking_service,browser_screen
+app_state.init_db();ops.init()
 sys.modules['settings']=real_settings
 def isolated_functions(name,names):
     tree=ast.parse((ROOT/name).read_text())
@@ -87,6 +88,22 @@ class FixTests(unittest.TestCase):
         browser_screen.pump(page,'screen',token)
         page.mouse.move.assert_called_once_with(500,200);page.mouse.wheel.assert_called_once_with(0,120)
         browser_screen.stop('screen',token)
+    def test_postgres_executescript_keeps_drop_index_in_order(self):
+        from pg_backend import Connection
+        raw=Mock()
+        Connection(raw).executescript('''
+            CREATE TABLE first_table(id INTEGER PRIMARY KEY, value REAL);
+            DROP INDEX IF EXISTS one_active_task;
+            CREATE TABLE second_table(id INTEGER PRIMARY KEY);
+        ''')
+        sql=[call.args[0].strip() for call in raw.execute.call_args_list]
+        self.assertEqual(sql,[
+            'SELECT pg_advisory_xact_lock(714202602)',
+            'CREATE TABLE first_table(id BIGSERIAL PRIMARY KEY, value DOUBLE PRECISION)',
+            'DROP INDEX IF EXISTS one_active_task',
+            'CREATE TABLE second_table(id BIGSERIAL PRIMARY KEY)',
+        ])
+
     def test_postgres_wheel_contract(self):
         env=isolated_functions('shared_screen.py',{'enqueue'})
         from contextlib import contextmanager

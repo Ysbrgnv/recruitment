@@ -145,9 +145,8 @@ def submit_task(task_id,prepare=False):
 from transaction_scope import atomic_submission
 @atomic_submission
 def start_task(vacancy_id, requested_count, responsible_email, mode="hh", xray_sources=None, owner_session=None):
-    task_id, created = create_task(uuid.uuid4().hex, vacancy_id, requested_count, responsible_email, mode)
+    task_id, created = create_task(uuid.uuid4().hex, vacancy_id, requested_count, responsible_email, mode, owner_session=owner_session)
     if created:
-        update_task(task_id,owner_session=owner_session)
         if mode=='xray':update_task(task_id,xray_sources=xray_sources or DEFAULT_SOURCES)
         submit_task(task_id, True)
     return task_id, created

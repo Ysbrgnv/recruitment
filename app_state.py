@@ -47,9 +47,6 @@ def init_db():
             updated REAL NOT NULL, expires REAL, data TEXT NOT NULL
         );
         DROP INDEX IF EXISTS one_active_task;
-        CREATE UNIQUE INDEX IF NOT EXISTS one_active_task
-        ON tasks(vacancy_id,email,mode)
-        WHERE status IN ('queued','running','waiting_approval','waiting_manual','waiting_browser');
         CREATE TABLE IF NOT EXISTS history (
             resume_id TEXT NOT NULL, vacancy_id TEXT NOT NULL,
             status TEXT NOT NULL, updated REAL NOT NULL, data TEXT NOT NULL,
@@ -81,14 +78,16 @@ def expire_reviews():
             task.update(status='expired',stage='expired',message='Срок подтверждения запроса истёк',error='Создайте новый запрос.',finished=now)
             _save(con,task)
 
-def create_task(task_id,vacancy_id,count,email,mode):
+def create_task(task_id,vacancy_id,count,email,mode,owner_session=None):
     expire_reviews()
     now=time.time(); email=email.strip().casefold()
     with database() as con:
         con.execute('BEGIN IMMEDIATE')
-        row=con.execute("SELECT * FROM tasks WHERE vacancy_id=? AND email=? AND mode=? AND status IN ('queued','running','waiting_approval','waiting_manual','waiting_browser')",(vacancy_id,email,mode)).fetchone()
-        if row:return _read(row)['task_id'],False
-        task={'task_id':task_id,'vacancy_id':vacancy_id,'responsible_email':email,'mode':mode,'requested_count':count,'status':'queued','stage':'setup','message':'Задача поставлена в очередь','progress':{'requested_count':count},'result':None,'error':None,'created':now,'expires':None}
+        rows=con.execute("SELECT * FROM tasks WHERE vacancy_id=? AND email=? AND mode=? AND status IN ('queued','running','waiting_approval','waiting_manual','waiting_browser')",(vacancy_id,email,mode)).fetchall()
+        for row in rows:
+            existing=_read(row)
+            if existing.get('owner_session')==owner_session:return existing['task_id'],False
+        task={'task_id':task_id,'vacancy_id':vacancy_id,'responsible_email':email,'mode':mode,'requested_count':count,'status':'queued','stage':'setup','message':'Задача поставлена в очередь','progress':{'requested_count':count},'result':None,'error':None,'created':now,'expires':None,'owner_session':owner_session}
         con.execute('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?)',(task_id,vacancy_id,email,mode,'queued',now,now,None,json.dumps(task,ensure_ascii=False)))
     return task_id,True
 
@@ -155,6 +154,3 @@ def list_tasks(vacancy_id, owner_session=None):
                 result.append(task)
                 if len(result)==20:break
         return result
-
-init_db()
-
