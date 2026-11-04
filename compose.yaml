@@ -195,6 +195,7 @@ services:
       BROWSER_MAX_SESSIONS: '8'
       GENERAL_CONSUMERS: '16'
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      NANO_TIMEOUT: ${NANO_TIMEOUT:-300}
     secrets:
     - db_app
     - browser_key

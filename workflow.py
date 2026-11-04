@@ -16,23 +16,54 @@ def pause(task_id):
     raise NeedsManual('Исход операции неизвестен; автоматический повтор заблокирован.')
 
 def _metrics():
-    return {k:0 for k in ['search_items','scanned','already_sent','load_failed','excluded_city','excluded_experience','pool','ai_requested','structured','manual_review','emails_sent','emails_failed','duplicate_at_reservation','successful_responses']}
+    return {k:0 for k in ['search_items','scanned','already_sent','load_failed','excluded_city','excluded_experience','pool','ai_requested','structured','manual_review','emails_sent','emails_failed','duplicate_at_reservation','successful_responses','suitable_count','not_suitable_count','manual_review_count','requested_count']}
 
 def _task_ops(task_id):
     with database() as con:return [ops.decode(x) for x in con.execute('SELECT * FROM operations WHERE task_id=? ORDER BY updated',(task_id,))]
 
+def _relevance_contract_valid(item):
+    if not isinstance(item,dict) or not isinstance(item.get('evaluation'),dict):return False
+    evaluation=item['evaluation']
+    if evaluation.get('structured') is not True:return False
+    suitability=evaluation.get('suitability')
+    if suitability not in {'suitable','not_suitable','manual_review'}:return False
+    mandatory=evaluation.get('mandatory_assessment')
+    if not isinstance(mandatory,list) or not mandatory:return False
+    statuses=[];seen=set()
+    for entry in mandatory:
+        if not isinstance(entry,dict):return False
+        requirement_id=entry.get('requirement_id');requirement=entry.get('requirement');status=entry.get('status');evidence=entry.get('evidence')
+        if not isinstance(requirement_id,str) or not requirement_id.strip() or requirement_id.strip() in seen:return False
+        if not isinstance(requirement,str) or not requirement.strip():return False
+        if status not in {'met','not_met','uncertain'}:return False
+        if not isinstance(evidence,list) or any(not isinstance(x,str) or not x.strip() for x in evidence):return False
+        if status=='met' and not evidence:return False
+        seen.add(requirement_id.strip());statuses.append(status)
+    expected='not_suitable' if 'not_met' in statuses else ('manual_review' if 'uncertain' in statuses else 'suitable')
+    return suitability==expected
+
 def _delivery_eligible(item):
-    return isinstance(item,dict) and isinstance(item.get('evaluation'),dict) and item['evaluation'].get('structured') is True
+    return _relevance_contract_valid(item)
+
+def _count_eligible(item):
+    return _relevance_contract_valid(item) and item['evaluation'].get('suitability')=='suitable'
 
 def _sync_metrics(task_id,metrics):
     operations=_task_ops(task_id)
     ai=[x for x in operations if x['kind']=='ai']
     completed=[x for x in ai if x['state']=='succeeded']
-    good=[x for x in completed if _delivery_eligible(x['data'])]
-    metrics.update(ai_requested=len(ai),successful_responses=len(good),structured=len(good),manual_review=sum(x['state'] in {'failed','skipped'} or (x['state']=='succeeded' and not _delivery_eligible(x['data'])) for x in ai))
+    deliverable=[x for x in completed if _delivery_eligible(x['data'])]
+    ai_by_resume={x['item_key']:x for x in completed}
     mail=[x for x in operations if x['kind']=='hh_email']
-    metrics.update(emails_sent=sum(x['state']=='succeeded' and x['data'].get('status')=='Sent' for x in mail),emails_failed=sum(x['state'] in {'failed','unknown'} for x in mail))
-    return good
+    sent=[x for x in mail if x['state']=='succeeded']
+    suitability_counts={'suitable':0,'not_suitable':0,'manual_review':0}
+    for operation in sent:
+        ai_operation=ai_by_resume.get(operation['item_key'])
+        if not ai_operation:continue
+        suitability=ai_operation['data'].get('evaluation',{}).get('suitability')
+        if suitability in suitability_counts:suitability_counts[suitability]+=1
+    metrics.update(ai_requested=len(ai),structured=len(deliverable),manual_review=sum(x['state'] in {'failed','skipped'} or (x['state']=='succeeded' and not _delivery_eligible(x['data'])) for x in ai),emails_sent=len(sent),emails_failed=sum(x['state'] in {'failed','unknown'} for x in mail),suitable_count=suitability_counts['suitable'],not_suitable_count=suitability_counts['not_suitable'],manual_review_count=suitability_counts['manual_review'],successful_responses=suitability_counts['suitable'])
+    return deliverable
 
 def _migrate_saved_results(task):
     # Preserve results from the previous build, rather than re-evaluate them.
@@ -78,14 +109,16 @@ def run_hh_steps(task_id,progress,staged=False):
     cp=task.get('checkpoint') or {};metrics=cp.get('metrics') or _metrics()
     vacancy=cp.get('vacancy') or service.fetch_vacancy_details(task['vacancy_id'])
     target=min(service.MAX_CANDIDATE_POOL,task['requested_count']*service.POOL_MULTIPLIER+service.POOL_EXTRA)
-    good=_sync_metrics(task_id,metrics)
+    deliverable=_sync_metrics(task_id,metrics);metrics['requested_count']=task['requested_count']
     # Finish mail for already received answers without evaluating the resume again.
-    for op in good:
+    for op in deliverable:
+        if metrics['emails_sent']>=task['requested_count']:break
         if staged:yield 'mail'
         item=op['data'];status=_hh_mail(task,vacancy,item)
         update_tracking(item['resume_id'],task['vacancy_id'],'Succeeded','Structured' if item['evaluation'].get('structured') else 'Raw text',item['evaluation'].get('total'),item['evaluation'].get('level'),status,result=item)
-    if good and staged:yield 'search'
-    if not cp.get('pool_complete') and len(good)<task['requested_count']:
+        _sync_metrics(task_id,metrics)
+    if deliverable and staged:yield 'search'
+    if not cp.get('pool_complete') and metrics['emails_sent']<task['requested_count']:
         pool=service._search_candidate_pool(task['vacancy_id'],vacancy,service.vacancy_requirements(vacancy),task['query'],target,task['requested_count'],metrics,progress)
         # Legacy explicitly allowed retries must not disappear when rebuilding the pool.
         for op in _task_ops(task_id):
@@ -96,9 +129,9 @@ def run_hh_steps(task_id,progress,staged=False):
     pool=cp.get('pool',[])
     progress('pool_ready',f"Пул сформирован: {len(pool)} кандидатов. Оценка после формирования пула.",service._progress_payload(metrics,target,task['requested_count']))
     yield 'ai' if staged else None  # Search worker is now released.
-    for rid,resume,notes in pool:
-        good=_sync_metrics(task_id,metrics)
-        if len(good)>=task['requested_count']:break
+    for candidate_number,(rid,resume,notes) in enumerate(pool,start=1):
+        _sync_metrics(task_id,metrics)
+        if metrics['emails_sent']>=task['requested_count']:break
         op=ops.get_op(task_id,'ai',rid)
         if op and op['state'] in {'unknown','sending'}:pause(task_id)
         if op and op['state'] in {'succeeded','skipped','failed'}:continue
@@ -107,9 +140,9 @@ def run_hh_steps(task_id,progress,staged=False):
         oid=ops.reserve_and_begin_ai(task_id,rid,task['vacancy_id'],vacancy.get('name') or '',resume.get('alternate_url') or '',task['responsible_email'])
         if oid is None:
             metrics['duplicate_at_reservation']+=1;continue
-        progress('ai',f"ИИ оценивает следующего кандидата; получено {len(good)} из {task['requested_count']}",service._progress_payload(metrics,target,task['requested_count']))
+        progress('ai',f"ИИ оценивает следующего кандидата; отправлено {metrics['emails_sent']} из {task['requested_count']}",service._progress_payload(metrics,target,task['requested_count']))
         try:
-            item=service._build_candidate_result(vacancy,resume,len(good)+1,notes)
+            item=service._build_candidate_result(vacancy,resume,candidate_number,notes)
             item.update(resume_id=rid,url=resume.get('alternate_url') or '')
         except AIUnavailableError as exc:
             if exc.request_sent:
@@ -135,12 +168,13 @@ def run_hh_steps(task_id,progress,staged=False):
         _sync_metrics(task_id,metrics);cp['metrics']=metrics;update_task(task_id,checkpoint=cp)
         progress('candidate_done','Кандидат обработан',service._progress_payload(metrics,target,task['requested_count']))
         yield 'ai' if staged else None
-    good=_sync_metrics(task_id,metrics)
-    metrics['shortfall']=max(0,task['requested_count']-len(good))
+    deliverable=_sync_metrics(task_id,metrics);metrics['requested_count']=task['requested_count']
+    metrics['shortfall']=max(0,task['requested_count']-metrics['emails_sent'])
     if metrics['shortfall']:metrics['shortfall_reason']='Сохранённый пул исчерпан или кандидаты пропущены после ручной проверки.'
-    items=[x['data'] for x in good]
-    manual=[x['data'] for x in _task_ops(task_id) if x['kind']=='ai' and x['state']=='succeeded' and not _delivery_eligible(x['data'])]
-    return {'mode':'hh','vacancy_id':task['vacancy_id'],'requested_count':task['requested_count'],'target_pool':target,'query':task['query'],'considered':len(good),'evaluated':[x for x in items if x['evaluation'].get('structured')],'manual_review':manual,'metrics':metrics,'mail_status':f"Писем отправлено: {metrics['emails_sent']}; ошибок: {metrics['emails_failed']}"}
+    sent_ids={x['item_key'] for x in _task_ops(task_id) if x['kind']=='hh_email' and x['state']=='succeeded'}
+    items=[x['data'] for x in deliverable if x['item_key'] in sent_ids]
+    manual=[x['data'] for x in _task_ops(task_id) if x['kind']=='ai' and x['state']=='succeeded' and (not _delivery_eligible(x['data']) or x['data'].get('evaluation',{}).get('suitability')=='manual_review')]
+    return {'mode':'hh','vacancy_id':task['vacancy_id'],'requested_count':task['requested_count'],'target_pool':target,'query':task['query'],'considered':metrics['emails_sent'],'evaluated':[x for x in items if x['evaluation'].get('structured')],'manual_review':manual,'metrics':metrics,'mail_status':f"Писем отправлено: {metrics['emails_sent']}; ошибок: {metrics['emails_failed']}"}
 
 def run_xray(task_id,progress):
     task=get_task(task_id)

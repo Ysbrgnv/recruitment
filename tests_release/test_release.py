@@ -8,7 +8,7 @@ os.environ.update(APP_ENV_FILE=str(Path(TEMP.name)/'source.env'),LOG_DIR=str(Pat
 os.environ.pop('DATABASE_URL',None);os.environ.pop('APP_SCHEMA_MANAGED',None)
 import requests
 import app_state as state,operation_store as ops,tracking_service as tracking
-import nano_client as nano,hh_client as hh,workflow,config_sync
+import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service
 from errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
@@ -43,6 +43,39 @@ class AITests(unittest.TestCase):
             with self.assertRaises(AIUnavailableError) as e:nano.ask('p','s')
             self.assertTrue(e.exception.request_sent)
 
+class RelevanceContractTests(unittest.TestCase):
+    def payload(self,suitability='suitable',status='met',item_evidence=None):
+        if item_evidence is None:item_evidence=['Подтвержден конкретный опыт']
+        return {'candidate_number':1,'suitability':suitability,'mandatory_assessment':[{'requirement_id':'target_function','requirement':'Целевая функция','status':status,'evidence':item_evidence}],'scores':{key:0 for key in nano.LIMITS},'evidence':{key:['данных недостаточно'] for key in nano.LIMITS},'strengths':[],'gaps':[],'missing_data':[],'recommendation':'Ручная проверка','human_review_required':True}
+    def evaluate(self,payload):
+        with patch.object(nano,'ask',return_value=json.dumps(payload,ensure_ascii=False)):return nano.evaluate_one_resume({}, {}, 1, [])
+    def test_valid_three_outcomes(self):
+        for suitability,status,evidence in [('suitable','met',['Факт']),('not_suitable','not_met',[]),('manual_review','uncertain',[])]:
+            with self.subTest(suitability=suitability):self.assertTrue(self.evaluate(self.payload(suitability,status,evidence))['structured'])
+    def test_contradictions_and_met_without_evidence_are_unstructured(self):
+        for payload in [self.payload('suitable','not_met',[]),self.payload('suitable','uncertain',[]),self.payload('suitable','met',[])]:
+            with self.subTest(payload=payload):self.assertFalse(self.evaluate(payload)['structured'])
+
+
+class MailRelevanceRenderingTests(unittest.TestCase):
+    def item(self,suitability,status,evidence=None,missing=None):
+        return {'number':1,'url':'https://example.invalid/resume','evaluation_text':'test','evaluation':{'structured':True,'suitability':suitability,'mandatory_assessment':[{'requirement_id':'target_function','requirement':'Опыт целевой функции','status':status,'evidence':evidence or []}],'scores':{key:0 for key in nano.LIMITS},'evidence':{key:['данных недостаточно'] for key in nano.LIMITS},'strengths':[],'gaps':[],'missing_data':missing or [],'recommendation':'Нейтральный комментарий','human_review_required':True,'total':10,'level':'Низкий'}}
+    def render(self,item):return mail_service.build_candidate_email({'name':'Vacancy','area':{'name':'Almaty'}},item,'query')
+    def test_three_suitability_statuses_are_rendered(self):
+        cases=[('suitable','met',['Подтвержден опыт'],'ПОДХОДИТ'),('not_suitable','not_met',['Опыт не подтвержден'],'НЕ ПОДХОДИТ'),('manual_review','uncertain',['Есть неполные сведения'],'ТРЕБУЕТСЯ РУЧНАЯ ПРОВЕРКА')]
+        for suitability,status,evidence,label in cases:
+            with self.subTest(suitability=suitability):
+                body=self.render(self.item(suitability,status,evidence,['Нужны данные о RFP']))
+                self.assertIn('СТАТУС СООТВЕТСТВИЯ:',body);self.assertIn(label,body);self.assertIn(evidence[0],body)
+    def test_mandatory_status_labels_and_messages_are_rendered(self):
+        cases=[('suitable','met','✅ Подтверждено'),('not_suitable','not_met','❌ Не подтверждено'),('manual_review','uncertain','⚠ Недостаточно данных')]
+        for suitability,status,label in cases:
+            with self.subTest(status=status):self.assertIn(label,self.render(self.item(suitability,status,['Evidence fact'],['Не хватает деталей'])))
+        self.assertIn('Кандидат не засчитан как соответствующий',self.render(self.item('not_suitable','not_met',['Нет опыта'])))
+        manual=self.render(self.item('manual_review','uncertain',['Неполный факт'],['Не хватает RFP']))
+        self.assertIn('Требуется решение рекрутера',manual);self.assertIn('Не хватает RFP',manual)
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -51,7 +84,11 @@ class WorkflowTests(unittest.TestCase):
         state.create_task('t','v',2,'test@example.com','hh')
         vacancy={'id':'v','name':'test'};pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[])]
         state.update_task('t',query='test',checkpoint={'vacancy':vacancy,'pool':pool,'pool_complete':True})
-    def item(self,v,r,n,notes):return {'resume_id':r['id'],'number':n,'evaluation':{'structured':True,'human_review_required':True,'total':50,'level':'test','gaps':[]},'evaluation_text':'test'}
+    def item(self,v,r,n,notes):return {'resume_id':r['id'],'number':n,'url':'https://example.invalid/resume','evaluation':{'structured':True,'suitability':'suitable','mandatory_assessment':[{'requirement_id':'target_function','requirement':'Целевая профессиональная функция','status':'met','evidence':['Подтвержден конкретный функциональный опыт']}],'scores':{key:0 for key in nano.LIMITS},'evidence':{key:['данных недостаточно'] for key in nano.LIMITS},'strengths':[],'human_review_required':True,'total':50,'level':'test','gaps':[],'missing_data':[],'recommendation':'Нейтральный комментарий'},'evaluation_text':'test'}
+    def relevance_item(self,v,r,n,notes,suitability,status,evidence=None):
+        item=self.item(v,r,n,notes);item['evaluation']['suitability']=suitability
+        item['evaluation']['mandatory_assessment']=[{'requirement_id':'target_function','requirement':'Опыт целевой функции','status':status,'evidence':[] if evidence is None else evidence}]
+        return item
     def invalid_item(self,v,r,n,notes,status='invalid_response'):
         return {'resume_id':r['id'],'number':n,'evaluation':{'structured':False,'human_review_required':True,'status':status,'total':None,'level':'Требуется ручная проверка','gaps':[]},'evaluation_text':'invalid'}
     def set_requested(self,count,pool=None):
@@ -124,6 +161,304 @@ class WorkflowTests(unittest.TestCase):
             result=workflow.run_hh('t',lambda *a:None)
         mail.assert_not_called();self.assertIsNone(ops.get_op('t','hh_email','legacy'))
         self.assertEqual(result['metrics']['successful_responses'],0);self.assertEqual(result['metrics']['shortfall'],1)
+    def test_suitable_is_emailed_and_counted(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.item),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once();self.assertEqual(result['metrics']['successful_responses'],1);self.assertEqual(result['metrics']['shortfall'],0)
+    def test_not_suitable_is_emailed_but_not_counted_and_next_is_processed(self):
+        self.set_requested(2);calls=[]
+        def build(v,r,n,notes):
+            calls.append(r['id'])
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Целевая функция не подтверждена']) if r['id']=='r1' else self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,['r1','r2']);self.assertEqual(mail.call_count,2);self.assertEqual(result['metrics']['emails_sent'],2);self.assertEqual(result['metrics']['successful_responses'],1)
+    def test_manual_review_is_emailed_but_not_counted_and_next_is_processed(self):
+        self.set_requested(2);calls=[]
+        def build(v,r,n,notes):
+            calls.append(r['id'])
+            item=self.relevance_item(v,r,n,notes,'manual_review','uncertain',['Участие в клиентских встречах указано без роли в цикле продаж']) if r['id']=='r1' else self.item(v,r,n,notes)
+            if r['id']=='r1':item['evaluation']['missing_data']=['Не описано участие в RFP или demo']
+            return item
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,['r1','r2']);self.assertEqual(mail.call_count,2);self.assertEqual(result['metrics']['emails_sent'],2);self.assertEqual(result['metrics']['successful_responses'],1)
+    def test_two_not_suitable_use_pool_ordinals_one_and_two(self):
+        self.set_requested(2);numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Целевая функция не подтверждена'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2)]);self.assertEqual(mail.call_count,2)
+        self.assertEqual(result['metrics']['successful_responses'],0)
+
+    def test_manual_review_after_not_suitable_uses_number_two(self):
+        self.set_requested(2);numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            if r['id']=='r1':return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+            return self.relevance_item(v,r,n,notes,'manual_review','uncertain',['Недостаточно сведений'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2)])
+
+    def test_suitable_after_non_counted_candidates_uses_number_three_and_closes_count(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[]),('r4',{'id':'r4'},[])]
+        self.set_requested(3,pool=pool);numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            if r['id']=='r1':return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+            if r['id']=='r2':return self.relevance_item(v,r,n,notes,'manual_review','uncertain',['Недостаточно сведений'])
+            return self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2),('r3',3)]);self.assertEqual(mail.call_count,3)
+        self.assertEqual(result['metrics']['successful_responses'],1);self.assertEqual(result['metrics']['shortfall'],0)
+
+    def test_skipped_candidate_keeps_gap_in_pool_ordinals(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool)
+        skipped=ops.begin('t','ai','r2');ops.finish(skipped,'skipped',{'reason':'manual skip'})
+        numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r3',3)])
+
+    def test_after_unknown_manual_skip_next_candidate_keeps_pool_ordinal(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);numbers=[]
+        def first_build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            if r['id']=='r2':raise AIUnavailableError('read timeout',True)
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=first_build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            with self.assertRaises(workflow.NeedsManual):workflow.run_hh('t',lambda *a:None)
+        unknown=ops.get_op('t','ai','r2');ops.resolve('t',unknown['id'],'skip','Reviewed timeout outcome')
+        def resumed_build(v,r,n,notes):
+            numbers.append((r['id'],n));return self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=resumed_build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2),('r3',3)]);self.assertEqual(mail.call_count,1)
+        self.assertEqual(result['metrics']['successful_responses'],1)
+
+    def test_existing_succeeded_result_keeps_saved_number(self):
+        self.set_requested(2)
+        saved=self.item(None,{'id':'r1'},17,[])
+        oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(oid,'succeeded',saved)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.item) as ai,patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(ops.get_op('t','ai','r1')['data']['number'],17)
+        self.assertEqual(ai.call_args.args[2],2)
+
+    def test_existing_succeeded_ai_and_email_are_not_renumbered_or_resent(self):
+        self.set_requested(1)
+        saved=self.item(None,{'id':'r1'},23,[])
+        ai_oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(ai_oid,'succeeded',saved)
+        mail_oid=ops.begin('t','hh_email','r1',{'item':saved});ops.finish(mail_oid,'succeeded',{'status':'Sent'})
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(ops.get_op('t','ai','r1')['data']['number'],23)
+        self.assertEqual(result['metrics']['successful_responses'],1)
+
+    def test_retry_same_resume_uses_same_pool_ordinal(self):
+        self.set_requested(2);numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            if r['id']=='r2' and sum(candidate=='r2' for candidate,_ in numbers)==1:raise AIUnavailableError('connect timeout',False)
+            return self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            with self.assertRaises(AIUnavailableError):workflow.run_hh('t',lambda *a:None)
+            with state.database() as con:self.assertEqual(ops.allow_confirmed_unsent_retries('t',con),1)
+            workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2),('r2',2)])
+
+    def test_candidate_number_does_not_depend_on_successful_responses(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(3,pool=pool);numbers=[]
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            return self.item(v,r,n,notes) if r['id']=='r1' else self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r2',2),('r3',3)])
+        self.assertEqual(result['metrics']['successful_responses'],1)
+
+    def test_candidate_number_does_not_depend_on_emails_sent(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);numbers=[]
+        skipped=ops.begin('t','ai','r2');ops.finish(skipped,'skipped',{'reason':'manual skip'})
+        def build(v,r,n,notes):
+            numbers.append((r['id'],n))
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта']) if r['id']=='r1' else self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent'):
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(numbers,[('r1',1),('r3',3)]);self.assertEqual(result['metrics']['emails_sent'],2)
+
+    def test_mail_quota_two_not_suitable_stops_after_two_emails(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);calls=[]
+        def build(v,r,n,notes):
+            calls.append((r['id'],n));return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r1',1),('r2',2)]);self.assertEqual(mail.call_count,2)
+        self.assertIsNone(ops.get_op('t','ai','r3'));self.assertIsNone(ops.get_op('t','hh_email','r3'))
+        self.assertEqual(result['considered'],2);self.assertEqual(result['metrics']['emails_sent'],2)
+        self.assertEqual(result['metrics']['not_suitable_count'],2);self.assertEqual(result['metrics']['suitable_count'],0)
+        self.assertEqual(result['metrics']['manual_review_count'],0);self.assertEqual(result['metrics']['shortfall'],0)
+
+    def test_mail_quota_not_suitable_and_manual_review_stops_after_two(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);calls=[]
+        def build(v,r,n,notes):
+            calls.append((r['id'],n))
+            if r['id']=='r1':return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+            return self.relevance_item(v,r,n,notes,'manual_review','uncertain',['Недостаточно данных'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r1',1),('r2',2)]);self.assertEqual(mail.call_count,2)
+        self.assertEqual(result['metrics']['not_suitable_count'],1);self.assertEqual(result['metrics']['manual_review_count'],1)
+        self.assertEqual(result['metrics']['suitable_count'],0);self.assertEqual(result['metrics']['successful_responses'],0)
+
+    def test_mail_quota_suitable_and_not_suitable_stops_after_two(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);calls=[]
+        def build(v,r,n,notes):
+            calls.append((r['id'],n))
+            return self.item(v,r,n,notes) if r['id']=='r1' else self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r1',1),('r2',2)]);self.assertEqual(mail.call_count,2)
+        self.assertEqual(result['metrics']['suitable_count'],1);self.assertEqual(result['metrics']['not_suitable_count'],1)
+        self.assertEqual(result['metrics']['successful_responses'],1)
+
+    def test_unstructured_does_not_take_mail_quota(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[]),('r4',{'id':'r4'},[])]
+        self.set_requested(2,pool=pool);calls=[]
+        def build(v,r,n,notes):
+            calls.append((r['id'],n))
+            if r['id']=='r1':return self.invalid_item(v,r,n,notes)
+            if r['id']=='r2':return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+            return self.relevance_item(v,r,n,notes,'manual_review','uncertain',['Недостаточно данных'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r1',1),('r2',2),('r3',3)]);self.assertEqual(mail.call_count,2)
+        self.assertIsNone(ops.get_op('t','hh_email','r1'));self.assertIsNone(ops.get_op('t','ai','r4'))
+        self.assertEqual(result['metrics']['emails_sent'],2);self.assertEqual(result['metrics']['shortfall'],0)
+
+    def test_ai_unknown_does_not_take_quota_and_pauses(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool);calls=[]
+        def build(v,r,n,notes):
+            calls.append((r['id'],n))
+            if r['id']=='r2':raise AIUnavailableError('read timeout',True)
+            return self.relevance_item(v,r,n,notes,'not_suitable','not_met',['Нет целевого опыта'])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            with self.assertRaises(workflow.NeedsManual):workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r1',1),('r2',2)]);self.assertEqual(mail.call_count,1)
+        self.assertEqual(ops.get_op('t','ai','r2')['state'],'unknown');self.assertIsNone(ops.get_op('t','ai','r3'))
+        metrics=workflow._metrics();workflow._sync_metrics('t',metrics);self.assertEqual(metrics['emails_sent'],1)
+
+    def test_existing_unknown_email_blocks_without_retry_or_quota(self):
+        self.set_requested(2,pool=[])
+        saved=self.relevance_item(None,{'id':'r1'},1,[],'manual_review','uncertain',['Недостаточно данных'])
+        ai_oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(ai_oid,'succeeded',saved)
+        mail_oid=ops.begin('t','hh_email','r1',{'item':saved});ops.finish(mail_oid,'unknown',{'item':saved})
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email') as mail:
+            with self.assertRaises(workflow.NeedsManual):workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();metrics=workflow._metrics();workflow._sync_metrics('t',metrics)
+        self.assertEqual(metrics['emails_sent'],0);self.assertEqual(ops.get_op('t','hh_email','r1')['state'],'unknown')
+
+    def test_existing_succeeded_email_counts_after_resume_and_is_not_resent(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(2,pool=pool)
+        saved=self.relevance_item(None,{'id':'r1'},1,[],'not_suitable','not_met',['Нет целевого опыта'])
+        ai_oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(ai_oid,'succeeded',saved)
+        mail_oid=ops.begin('t','hh_email','r1',{'item':saved});ops.finish(mail_oid,'succeeded',{'status':'Sent'})
+        calls=[]
+        def build(v,r,n,notes):calls.append((r['id'],n));return self.item(v,r,n,notes)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(calls,[('r2',2)]);self.assertEqual(mail.call_count,1);self.assertIsNone(ops.get_op('t','ai','r3'))
+        self.assertEqual(result['metrics']['emails_sent'],2);self.assertEqual(result['metrics']['not_suitable_count'],1)
+        self.assertEqual(result['metrics']['suitable_count'],1);self.assertEqual(result['metrics']['shortfall'],0)
+
+    def test_saved_not_suitable_after_restart_is_emailed_without_ai_repeat(self):
+        self.set_requested(1,pool=[])
+        saved=self.relevance_item(None,{'id':'r1'},1,[],'not_suitable','not_met',['Нет целевого опыта'])
+        ai_oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(ai_oid,'succeeded',saved)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once();self.assertEqual(result['metrics']['emails_sent'],1)
+        self.assertEqual(result['metrics']['not_suitable_count'],1);self.assertEqual(result['metrics']['successful_responses'],0)
+
+    def test_saved_manual_review_after_restart_is_emailed_without_ai_repeat(self):
+        self.set_requested(1,pool=[])
+        saved=self.relevance_item(None,{'id':'r1'},1,[],'manual_review','uncertain',['Недостаточно данных'])
+        ai_oid=ops.reserve_and_begin_ai('t','r1','v','v','','test@example.com');ops.finish(ai_oid,'succeeded',saved)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_called_once();self.assertEqual(result['metrics']['emails_sent'],1)
+        self.assertEqual(result['metrics']['manual_review_count'],1);self.assertEqual(result['metrics']['successful_responses'],0)
+
+    def test_suitability_metrics_and_shortfall_are_based_on_succeeded_emails(self):
+        pool=[('r1',{'id':'r1'},[]),('r2',{'id':'r2'},[]),('r3',{'id':'r3'},[])]
+        self.set_requested(3,pool=pool)
+        outcomes={'r1':('suitable','met',['Факт']),'r2':('not_suitable','not_met',['Нет опыта']),'r3':('manual_review','uncertain',['Недостаточно данных'])}
+        def build(v,r,n,notes):
+            suitability,status,evidence=outcomes[r['id']]
+            return self.item(v,r,n,notes) if suitability=='suitable' else self.relevance_item(v,r,n,notes,suitability,status,evidence)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        self.assertEqual(mail.call_count,3);self.assertEqual(result['metrics']['emails_sent'],3)
+        self.assertEqual(result['metrics']['suitable_count'],1);self.assertEqual(result['metrics']['not_suitable_count'],1)
+        self.assertEqual(result['metrics']['manual_review_count'],1);self.assertEqual(result['metrics']['successful_responses'],1)
+        self.assertEqual(result['metrics']['requested_count'],3);self.assertEqual(result['metrics']['shortfall'],0)
+
+    def test_shortfall_uses_emails_sent(self):
+        self.set_requested(2,pool=[('r1',{'id':'r1'},[])])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=self.invalid_item),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['emails_sent'],0);self.assertEqual(result['metrics']['shortfall'],2)
+
+    def assert_legacy_succeeded_mail_takes_quota(self,status):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        oid=ops.begin('t','hh_email','legacy-'+status);ops.finish(oid,'succeeded',{'status':status})
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI must not start')),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['emails_sent'],1);self.assertEqual(result['considered'],1)
+
+    def test_legacy_succeeded_displayed_mail_takes_quota(self):
+        self.assert_legacy_succeeded_mail_takes_quota('Displayed')
+
+    def test_legacy_succeeded_opened_mail_takes_quota(self):
+        self.assert_legacy_succeeded_mail_takes_quota('Opened')
+
+    def test_contradictory_suitable_not_met_is_not_emailed(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        build=lambda v,r,n,notes:self.relevance_item(v,r,n,notes,'suitable','not_met',[])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['successful_responses'],0)
+    def test_met_without_evidence_is_not_emailed(self):
+        self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
+        build=lambda v,r,n,notes:self.relevance_item(v,r,n,notes,'suitable','met',[])
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=build),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['successful_responses'],0)
+    def test_legacy_structured_without_suitability_is_not_emailed_or_repeated(self):
+        self.set_requested(1,pool=[])
+        legacy={'resume_id':'legacy','number':1,'evaluation':{'structured':True,'total':50,'level':'legacy'},'evaluation_text':'legacy'}
+        oid=ops.begin('t','ai','legacy');ops.finish(oid,'succeeded',legacy)
+        with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email') as mail:
+            result=workflow.run_hh('t',lambda *a:None)
+        mail.assert_not_called();self.assertEqual(result['metrics']['successful_responses'],0);self.assertEqual([x['resume_id'] for x in result['manual_review']],['legacy'])
+
     def test_existing_succeeded_email_is_not_repeated(self):
         item=self.item(None,{'id':'r1'},1,[])
         oid=ops.begin('t','hh_email','r1',{'item':item});ops.finish(oid,'succeeded',{'status':'Sent'})

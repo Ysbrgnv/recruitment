@@ -51,21 +51,35 @@ EVALUATION_SYSTEM = """Ты выполняешь предварительное 
 5. Не делай выводов о личности, мотивации, честности, культуре, характере или вероятности ухода.
 6. Не пиши "нанять", "отказать" или иной окончательный кадровый вердикт.
 7. Для каждого раздела приведи краткое подтверждение из профессиональных данных либо укажи, что данных недостаточно.
-8. human_review_required всегда true. Итоговый балл не вычисляй, его рассчитает Python.
-9. Применяй единую рубрику к каждому разделу относительно его максимума:
+8. Отдельно оцени каждое обязательное требование вакансии в mandatory_assessment. Для каждого элемента верни уникальный непустой requirement_id, краткий текст requirement, status из закрытого списка met, not_met, uncertain и evidence.
+9. status=met допустим только при наличии конкретного профессионального evidence из резюме. Общие слова B2B, product, client, presentation и solution сами по себе не подтверждают целевую функцию.
+10. suitability использует закрытый список suitable, not_suitable, manual_review. Любой mandatory status=not_met требует suitability=not_suitable. Если not_met отсутствует, но есть uncertain, suitability должен быть manual_review. suitable допустим только когда все mandatory status=met и каждый содержит evidence.
+11. Название должности не является единственным критерием: учитывай подтвержденные функции и опыт, включая эквивалентные названия ролей. Руководящий стаж сам по себе не заменяет обязательный целевой опыт.
+12. human_review_required всегда true. Итоговый балл не вычисляй, его рассчитает Python.
+13. Применяй единую рубрику к каждому разделу относительно его максимума:
    - 100% максимума: все существенные требования раздела явно подтверждены;
    - 75% максимума: подтверждено большинство существенных требований;
    - 50% максимума: подтверждена примерно половина требований;
    - 25% максимума: подтверждены только отдельные требования;
    - 0%: подтверждений нет.
-10. Если профессиональные сведения по разделу отсутствуют, балл не должен превышать 25% максимума раздела.
-11. Если требование не указано в вакансии, не снижай оценку кандидата за его отсутствие.
-12. Используй только целые баллы в пределах максимума каждого раздела.
-13. Верни только валидный JSON без markdown и комментариев."""
+14. Если профессиональные сведения по разделу отсутствуют, балл не должен превышать 25% максимума раздела.
+15. Если требование не указано в вакансии, не снижай оценку кандидата за его отсутствие.
+16. Используй только целые баллы в пределах максимума каждого раздела.
+17. total, level и gaps не определяют suitability автоматически.
+18. Верни только валидный JSON без markdown и комментариев."""
 
 EVAL_PROMPT = """Сопоставь кандидата с вакансией и верни JSON строго такой структуры:
 {{
   "candidate_number": {number},
+  "suitability": "suitable|not_suitable|manual_review",
+  "mandatory_assessment": [
+    {{
+      "requirement_id": "стабильный уникальный идентификатор обязательного требования",
+      "requirement": "обязательное требование вакансии",
+      "status": "met|not_met|uncertain",
+      "evidence": ["конкретный профессиональный факт из резюме; для met список не пуст"]
+    }}
+  ],
   "scores": {{
     "mandatory_requirements": 0,
     "relevant_experience": 0,
@@ -184,10 +198,28 @@ def evaluate_one_resume(vacancy: dict, resume: dict, number: int, notes: list[st
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.I | re.S)
         data = json.loads(cleaned)
         if not isinstance(data, dict):raise ValueError('Корень ответа должен быть объектом')
-        required={'candidate_number','scores','evidence','strengths','gaps','missing_data','recommendation','human_review_required'}
+        required={'candidate_number','suitability','mandatory_assessment','scores','evidence','strengths','gaps','missing_data','recommendation','human_review_required'}
         if not required.issubset(data):raise ValueError('Отсутствуют обязательные поля ответа')
         if type(data['candidate_number']) is not int or data['candidate_number']!=number:raise ValueError('Неверный номер кандидата')
         if data['human_review_required'] is not True:raise ValueError('Не подтверждена ручная проверка')
+        suitability=data['suitability']
+        if suitability not in {'suitable','not_suitable','manual_review'}:raise ValueError('Неверный suitability')
+        mandatory=data['mandatory_assessment']
+        if not isinstance(mandatory,list) or not mandatory:raise ValueError('Неверный mandatory_assessment')
+        seen_requirement_ids=set();mandatory_statuses=[];validated_mandatory=[]
+        for entry in mandatory:
+            if not isinstance(entry,dict) or set(entry)!={'requirement_id','requirement','status','evidence'}:raise ValueError('Неверный mandatory item')
+            requirement_id=entry['requirement_id'];requirement=entry['requirement'];status=entry['status'];item_evidence=entry['evidence']
+            normalized_id=requirement_id.strip() if isinstance(requirement_id,str) else ''
+            if not normalized_id or normalized_id in seen_requirement_ids:raise ValueError('Неверный requirement_id')
+            if not isinstance(requirement,str) or not requirement.strip():raise ValueError('Нет текста обязательного требования')
+            if status not in {'met','not_met','uncertain'}:raise ValueError('Неверный mandatory status')
+            if not isinstance(item_evidence,list) or any(not isinstance(x,str) or not x.strip() for x in item_evidence):raise ValueError('Неверный mandatory evidence')
+            if status=='met' and not item_evidence:raise ValueError('Для met требуется evidence')
+            seen_requirement_ids.add(normalized_id);mandatory_statuses.append(status)
+            validated_mandatory.append({'requirement_id':normalized_id,'requirement':requirement.strip(),'status':status,'evidence':_string_list(item_evidence)})
+        expected_suitability='not_suitable' if 'not_met' in mandatory_statuses else ('manual_review' if 'uncertain' in mandatory_statuses else 'suitable')
+        if suitability!=expected_suitability:raise ValueError('Suitability противоречит mandatory_assessment')
         scores=data['scores'];evidence=data['evidence']
         if not isinstance(scores,dict) or set(scores)!=set(LIMITS):raise ValueError('Неверная схема баллов')
         if not isinstance(evidence,dict) or set(evidence)!=set(LIMITS):raise ValueError('Неверная схема подтверждений')
@@ -202,6 +234,8 @@ def evaluate_one_resume(vacancy: dict, resume: dict, number: int, notes: list[st
         return {
             "structured": True,
             "candidate_number": number,
+            "suitability": suitability,
+            "mandatory_assessment": validated_mandatory,
             "scores": scores,
             "total": total,
             "level": level(total),
@@ -246,6 +280,14 @@ def evaluation_to_text(evaluation: dict) -> str:
         f"Кандидат №{evaluation['candidate_number']}",
         f"Оценка: {evaluation['total']}/100",
         f"Уровень: {evaluation['level']}",
+        f"Релевантность: {evaluation.get('suitability')}",
+        "",
+        "Обязательные требования:",
+    ]
+    for entry in evaluation.get("mandatory_assessment", []):
+        lines.append(f"- {entry['requirement_id']}: {entry['status']} — {entry['requirement']}")
+        for fact in entry.get("evidence", []):lines.append(f"  • {fact}")
+    lines += [
         "",
         "Разбивка и подтверждения:",
     ]

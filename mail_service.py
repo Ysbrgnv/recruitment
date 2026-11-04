@@ -11,6 +11,33 @@ LABELS = {
     "desirable_requirements": "Желательные требования",
     "additional_conditions": "Дополнительные условия",
 }
+
+SUITABILITY = {
+    "suitable": {
+        "label": "ПОДХОДИТ",
+        "color": "#177245",
+        "background": "#eaf7ef",
+        "message": "Кандидат засчитан как соответствующий обязательным требованиям вакансии.",
+    },
+    "not_suitable": {
+        "label": "НЕ ПОДХОДИТ",
+        "color": "#b42318",
+        "background": "#fff0ee",
+        "message": "Кандидат не засчитан как соответствующий обязательным требованиям вакансии.",
+    },
+    "manual_review": {
+        "label": "ТРЕБУЕТСЯ РУЧНАЯ ПРОВЕРКА",
+        "color": "#8a5a00",
+        "background": "#fff7cc",
+        "message": "Автоматическое решение не принято. Требуется решение рекрутера.",
+    },
+}
+MANDATORY_STATUS = {
+    "met": ("✅ Подтверждено", "#177245"),
+    "not_met": ("❌ Не подтверждено", "#b42318"),
+    "uncertain": ("⚠ Недостаточно данных", "#8a5a00"),
+}
+
 LIMITS = {
     "mandatory_requirements": 40, "relevant_experience": 25,
     "responsibilities": 15, "education_and_certificates": 10,
@@ -29,6 +56,36 @@ def _list_html(items, empty="Не указано"):
     return "<ul style='margin:8px 0 0;padding-left:20px'>" + "".join(
         f"<li style='margin:0 0 7px'>{e(item)}</li>" for item in values
     ) + "</ul>"
+
+
+
+def _suitability_html(evaluation):
+    meta = SUITABILITY.get(evaluation.get("suitability"))
+    if not meta:
+        return ""
+    return (
+        f"<div style='margin:0 0 20px;padding:18px 20px;border:2px solid {meta['color']};"
+        f"border-radius:12px;background:{meta['background']}'>"
+        "<div style='font-size:13px;font-weight:800;letter-spacing:.5px'>СТАТУС СООТВЕТСТВИЯ:</div>"
+        f"<div style='margin-top:5px;color:{meta['color']};font-size:24px;font-weight:900'>{e(meta['label'])}</div>"
+        f"<div style='margin-top:8px;line-height:1.45'>{e(meta['message'])}</div>"
+        "</div>"
+    )
+
+
+def _mandatory_html(evaluation):
+    cards = []
+    for item in evaluation.get("mandatory_assessment") or []:
+        label, color = MANDATORY_STATUS.get(item.get("status"), ("Неизвестный статус", "#555"))
+        evidence = _list_html(item.get("evidence"), "Evidence не указано")
+        cards.append(
+            f"<div style='margin-top:10px;padding:14px;border:1px solid #e5e5e5;border-left:5px solid {color};border-radius:8px'>"
+            f"<div style='color:{color};font-weight:900'>{e(label)}</div>"
+            f"<div style='margin-top:5px;font-weight:700'>{e(item.get('requirement'))}</div>"
+            f"<div style='margin-top:7px'><b>Evidence</b>{evidence}</div>"
+            "</div>"
+        )
+    return "".join(cards) or "<div style='color:#777'>Обязательные требования не представлены.</div>"
 
 
 def _score_rows(evaluation):
@@ -53,6 +110,12 @@ def build_candidate_email(vacancy: dict, item: dict, search_query: str) -> str:
     score = f"{evaluation.get('total')}/100" if structured else "Ручная проверка"
     level = evaluation.get("level") if structured else "Ответ ИИ получен в неструктурированном формате"
     city = (vacancy.get("area") or {}).get("name") or "Не указан"
+    suitability = evaluation.get("suitability")
+    status_block = _suitability_html(evaluation)
+    mandatory_block = _mandatory_html(evaluation)
+    manual_missing = ""
+    if suitability == "manual_review":
+        manual_missing = "<div style='margin-top:14px;padding:16px;background:#fff7cc;border-left:5px solid #8a5a00'><b>Каких данных недостаточно</b>" + _list_html(evaluation.get("missing_data"), "Перечень недостающих данных не указан") + "</div>"
     score_table = (
         f"<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='border:1px solid #e4e4e4;border-radius:10px'>{_score_rows(evaluation)}</table>"
         if structured else
@@ -67,6 +130,7 @@ def build_candidate_email(vacancy: dict, item: dict, search_query: str) -> str:
   <div style='color:#dddddd;margin-top:6px'>Предварительное профессиональное сопоставление</div>
 </td></tr>
 <tr><td style='padding:28px 30px'>
+  {status_block}
   <div style='font-size:22px;font-weight:800'>{e(vacancy.get('name'))}</div>
   <div style='color:#666;margin-top:5px'>{e(city)} · Кандидат №{item['number']}</div>
   <table role='presentation' width='100%' style='margin:20px 0;background:#111;border-radius:10px'>
@@ -74,12 +138,14 @@ def build_candidate_email(vacancy: dict, item: dict, search_query: str) -> str:
     <td align='right' style='padding:17px 20px'><span style='background:#FFD400;color:#111;padding:9px 13px;border-radius:8px;font-size:19px;font-weight:900'>{e(score)}</span></td></tr>
   </table>
   {score_table}
+  <div style='margin-top:20px;padding:16px;border:1px solid #e5e5e5;border-radius:10px'><b>Обязательные требования</b>{mandatory_block}</div>
+  {manual_missing}
   <table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='margin-top:20px'>
     <tr><td width='50%' style='padding:16px;background:#f7f7f7;vertical-align:top'><b>Подтверждённые сильные стороны</b>{_list_html(evaluation.get('strengths'))}</td>
     <td width='12'></td><td width='50%' style='padding:16px;background:#fff7cc;vertical-align:top'><b>Неподтверждённые требования и риски</b>{_list_html(evaluation.get('gaps'))}</td></tr>
   </table>
   <div style='margin-top:14px;padding:16px;border:1px solid #e5e5e5;border-radius:10px'><b>Недостающие профессиональные данные</b>{_list_html(evaluation.get('missing_data'), 'Дополнительные данные не отмечены')}</div>
-  <div style='margin-top:14px;padding:16px;border-left:5px solid #FFD400;background:#fafafa'><b>Рекомендация для следующего шага</b><div style='margin-top:7px;line-height:1.5'>{e(evaluation.get('recommendation') or 'Требуется ручная проверка рекрутером.')}</div></div>
+  <div style='margin-top:14px;padding:16px;border-left:5px solid #FFD400;background:#fafafa'><b>Комментарий к следующему шагу</b><div style='margin-top:7px;line-height:1.5'>{e(evaluation.get('recommendation') or 'Требуется ручная проверка рекрутером.')}</div></div>
   <div style='margin-top:18px'><a href='{e(item['url'])}' style='display:inline-block;background:#FFD400;color:#111;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:800'>Открыть резюме в HH</a></div>
   <div style='margin-top:20px;color:#777;font-size:12px;line-height:1.45'>Поисковый запрос HH: {e(search_query)}<br>Оценка носит рекомендательный характер. Система не принимает решение о найме или отказе.</div>
 </td></tr>
