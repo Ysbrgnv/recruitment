@@ -16,7 +16,7 @@ def pause(task_id):
     raise NeedsManual('Исход операции неизвестен; автоматический повтор заблокирован.')
 
 def _metrics():
-    return {k:0 for k in ['search_items','scanned','already_sent','load_failed','excluded_city','excluded_experience','pool','ai_requested','structured','manual_review','emails_sent','emails_failed','duplicate_at_reservation','successful_responses','suitable_count','not_suitable_count','manual_review_count','requested_count']}
+    return {k:0 for k in ['search_items','scanned','already_sent','load_failed','excluded_city','excluded_experience','excluded_professional_mismatch','excluded_leadership_mismatch','excluded_level_mismatch','level_unknown_kept','pool','ai_requested','structured','manual_review','emails_sent','emails_failed','duplicate_at_reservation','successful_responses','suitable_count','not_suitable_count','manual_review_count','requested_count']}
 
 def _task_ops(task_id):
     with database() as con:return [ops.decode(x) for x in con.execute('SELECT * FROM operations WHERE task_id=? ORDER BY updated',(task_id,))]
@@ -106,7 +106,8 @@ def run_hh(task_id,progress):
 def run_hh_steps(task_id,progress,staged=False):
     task=get_task(task_id);_migrate_saved_results(task)
     if ops.unknowns(task_id):pause(task_id)
-    cp=task.get('checkpoint') or {};metrics=cp.get('metrics') or _metrics()
+    cp=task.get('checkpoint') or {};metrics={**_metrics(),**(cp.get('metrics') or {})}
+    profile=cp.get('vacancy_search_profile') or task.get('vacancy_search_profile');pool_exclusions=dict(cp.get('pool_exclusions') or {})
     vacancy=cp.get('vacancy') or service.fetch_vacancy_details(task['vacancy_id'])
     target=min(service.MAX_CANDIDATE_POOL,task['requested_count']*service.POOL_MULTIPLIER+service.POOL_EXTRA)
     deliverable=_sync_metrics(task_id,metrics);metrics['requested_count']=task['requested_count']
@@ -119,12 +120,15 @@ def run_hh_steps(task_id,progress,staged=False):
         _sync_metrics(task_id,metrics)
     if deliverable and staged:yield 'search'
     if not cp.get('pool_complete') and metrics['emails_sent']<task['requested_count']:
-        pool=service._search_candidate_pool(task['vacancy_id'],vacancy,service.vacancy_requirements(vacancy),task['query'],target,task['requested_count'],metrics,progress)
+        def save_partial(partial_pool,partial_metrics,partial_exclusions):
+            partial_cp={'vacancy':vacancy,'vacancy_search_profile':profile,'pool':list(partial_pool),'pool_complete':False,'metrics':dict(partial_metrics),'pool_exclusions':dict(partial_exclusions)}
+            update_task(task_id,checkpoint=partial_cp,pool_ids=[x[0] for x in partial_pool])
+        pool=service._search_candidate_pool(task['vacancy_id'],vacancy,service.vacancy_requirements(vacancy),task['query'],target,task['requested_count'],metrics,progress,profile=profile,pool_exclusions=pool_exclusions,existing_pool=cp.get('pool') or [],checkpoint=save_partial)
         # Legacy explicitly allowed retries must not disappear when rebuilding the pool.
         for op in _task_ops(task_id):
             if op['kind']=='legacy_ai' and op['state']=='retry_allowed' and op['item_key'] not in [x[0] for x in pool]:
                 resume=service.fetch_resume_details(op['item_key']);pool.append((op['item_key'],resume,[]))
-        cp={'vacancy':vacancy,'pool':pool,'pool_complete':True,'metrics':metrics}
+        cp={'vacancy':vacancy,'vacancy_search_profile':profile,'pool':pool,'pool_complete':True,'metrics':metrics,'pool_exclusions':pool_exclusions}
         update_task(task_id,checkpoint=cp,pool_ids=[x[0] for x in pool])
     pool=cp.get('pool',[])
     progress('pool_ready',f"Пул сформирован: {len(pool)} кандидатов. Оценка после формирования пула.",service._progress_payload(metrics,target,task['requested_count']))

@@ -4,8 +4,8 @@ import time
 from app_state import set_review, get_task, update_task
 from errors import AIUnavailableError, HHUnavailableError
 from hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
-from nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
-from recruitment_data import resume_filter_result, vacancy_requirements
+from nano_client import evaluate_one_resume, evaluation_to_text, generate_vacancy_search_plan, generate_xray_query
+from recruitment_data import (classify_candidate_level, resume_filter_result, select_current_or_latest_experience, vacancy_requirements)
 from settings import (
     MAX_CANDIDATE_POOL, POOL_EXTRA, POOL_MULTIPLIER,
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
@@ -14,6 +14,61 @@ from settings import (
 from tracking_service import reset_history_cache, was_sent_to_ai
 
 logger = logging.getLogger(__name__)
+
+
+CLEAN_POOL_SCAN_MULTIPLIER = 2
+_PROFESSIONAL_MISMATCH_TITLES = {
+    "business analyst", "бизнес-аналитик", "system analyst", "системный аналитик",
+    "head of analytics", "руководитель аналитики", "director of data", "директор по данным",
+}
+
+
+def _resume_professional_text(resume, current_role):
+    values=[resume.get("title"),current_role.get("title"),current_role.get("responsibilities")]
+    values.extend(resume.get("skill_set") or [])
+    for role in resume.get("professional_roles") or []:
+        values.append(role.get("name") if isinstance(role,dict) else role)
+    for item in resume.get("experience") or []:
+        if isinstance(item,dict):values.extend([item.get("position"),item.get("description")])
+    return " ".join(str(value) for value in values if value).casefold()
+
+
+def _profile_terms(profile):
+    terms=[]
+    for title in profile.get("accepted_role_titles") or []:terms.append(title.casefold())
+    for function in profile.get("target_functions") or []:terms.append(function.casefold())
+    for concept in profile.get("mandatory_search_concepts") or []:
+        if isinstance(concept,dict):terms.extend(str(x).casefold() for x in concept.get("alternatives") or [])
+    return [term for term in terms if len(term)>2]
+
+
+def professional_prefilter(profile,resume,current_role):
+    if not isinstance(profile,dict):return {"decision":"keep","strength":"unknown","evidence":["Legacy task without VacancySearchProfile."]}
+    text=_resume_professional_text(resume,current_role);title=str(current_role.get("title") or "").casefold()
+    matched=[term for term in _profile_terms(profile) if term in text]
+    role_family=str(profile.get("role_family") or "").casefold()
+    presales=any(x in role_family for x in ("presale","pre-sale","пресейл"))
+    functional_presales=any(x in text for x in ("discovery","выявлен","квалификац","демонстрац","demo","solution demo","poc","пилот","предпродаж","presale","pre-sale","пресейл","sales engineer","solution consultant"))
+    if presales and title in _PROFESSIONAL_MISMATCH_TITLES and not functional_presales:
+        return {"decision":"professional_mismatch","strength":"insufficient","evidence":[f"Current role is outside Presales: {current_role.get('title')}"]}
+    if matched or (presales and functional_presales):
+        return {"decision":"keep","strength":"strong","evidence":matched[:3] or ["Resume contains Presales functional evidence."]}
+    return {"decision":"keep","strength":"unknown","evidence":["Insufficient evidence for deterministic professional exclusion."]}
+
+
+def _pool_filter_decision(profile,resume):
+    current_role=select_current_or_latest_experience(resume)
+    professional=professional_prefilter(profile,resume,current_role)
+    candidate=classify_candidate_level(current_role)
+    vacancy_level=((profile or {}).get("leadership_intent") or {}).get("level","unknown")
+    if professional["decision"]=="professional_mismatch":
+        return False,"professional_mismatch",vacancy_level,candidate,professional["evidence"]
+    candidate_level=candidate["level"]
+    if vacancy_level=="individual_contributor" and candidate_level=="leadership":
+        return False,"leadership_mismatch",vacancy_level,candidate,candidate["evidence"]
+    if vacancy_level=="leadership" and candidate_level=="individual_contributor":
+        return False,"level_mismatch",vacancy_level,candidate,candidate["evidence"]
+    return True,None,vacancy_level,candidate,professional["evidence"]+candidate["evidence"]
 
 
 def _progress_payload(metrics, target_pool, requested_count):
@@ -31,11 +86,14 @@ def _build_candidate_result(vacancy, resume, number, notes):
     }
 
 
-def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress):
+def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None):
     reset_history_cache()
-    candidates, seen = [], set()
+    candidates = list(existing_pool or [])
+    pool_exclusions = pool_exclusions if isinstance(pool_exclusions,dict) else {}
+    seen = {str(item[0]) for item in candidates if item} | set(pool_exclusions)
+    scan_budget = SEARCH_SCAN_LIMIT if not profile else max(SEARCH_SCAN_LIMIT,min(SEARCH_SCAN_LIMIT*CLEAN_POOL_SCAN_MULTIPLIER,target_pool*8))
     for page in range(SEARCH_MAX_PAGES):
-        if metrics["scanned"] >= SEARCH_SCAN_LIMIT or len(candidates) >= target_pool:
+        if metrics["scanned"] >= scan_budget or len(candidates) >= target_pool:
             break
         params = {"text": query, "per_page": SEARCH_PER_PAGE, "page": page}
         if requirements.get("area_id"):
@@ -45,7 +103,7 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
         metrics["search_items"] += len(items)
         progress("search", f"Поиск HH: страница {page + 1}", _progress_payload(metrics, target_pool, requested_count))
         for item in items:
-            if metrics["scanned"] >= SEARCH_SCAN_LIMIT or len(candidates) >= target_pool:
+            if metrics["scanned"] >= scan_budget or len(candidates) >= target_pool:
                 break
             resume_id = str(item.get("id") or "")
             if not resume_id or resume_id in seen:
@@ -74,8 +132,18 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
             if was_sent_to_ai(resume_id, vacancy_id):
                 metrics["already_sent"] += 1
                 continue
+            if profile:
+                keep,filter_reason,vacancy_level,candidate_level,evidence=_pool_filter_decision(profile,resume)
+                if not keep:
+                    metric={"professional_mismatch":"excluded_professional_mismatch","leadership_mismatch":"excluded_leadership_mismatch","level_mismatch":"excluded_level_mismatch"}[filter_reason]
+                    metrics[metric]=metrics.get(metric,0)+1
+                    pool_exclusions[resume_id]={"reason":filter_reason,"vacancy_level":vacancy_level,"candidate_level":candidate_level["level"],"evidence":[str(x)[:240] for x in evidence[:4]]}
+                    if checkpoint:checkpoint(candidates,metrics,pool_exclusions)
+                    continue
+                if candidate_level["level"]=="unknown":metrics["level_unknown_kept"]=metrics.get("level_unknown_kept",0)+1
             candidates.append((resume_id, resume, notes))
             metrics["pool"] = len(candidates)
+            if checkpoint:checkpoint(candidates,metrics,pool_exclusions)
             progress("history", f"Формируется пул: {len(candidates)} из {target_pool}", _progress_payload(metrics, target_pool, requested_count))
         if page + 1 >= data.get("pages", 0):
             break
@@ -108,8 +176,8 @@ def prepare_query(vacancy_id, task_id, mode):
         try:query=build_plan(generate_xray_query(vacancy),task.get('xray_sources',DEFAULT_SOURCES),city)
         except ValueError as exc:raise UserFacingError(str(exc)) from exc
     else:
-        query=generate_resume_language_query(vacancy)
-    set_review(task_id, query)
+        plan=generate_vacancy_search_plan(vacancy);query=plan["query"]
+    set_review(task_id, query, vacancy_search_profile=plan.get("profile") if mode != 'xray' else None)
 
 
 def finish_xray_query(task_id, query):

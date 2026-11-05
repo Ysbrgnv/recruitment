@@ -102,8 +102,10 @@ def update_task(task_id,**fields):
         if task is None:raise KeyError(task_id)
         task.update(fields);_save(con,task)
 
-def set_review(task_id,query):
-    update_task(task_id,status='waiting_approval',stage='query_review',query=query,expires=time.time()+REVIEW_TTL,message='Проверьте поисковый запрос',progress={'query':query})
+def set_review(task_id,query,vacancy_search_profile=None):
+    fields={'status':'waiting_approval','stage':'query_review','query':query,'expires':time.time()+REVIEW_TTL,'message':'Проверьте поисковый запрос','progress':{'query':query}}
+    if vacancy_search_profile is not None:fields['vacancy_search_profile']=vacancy_search_profile
+    update_task(task_id,**fields)
 
 def save_query(task_id,query):
     expire_reviews()

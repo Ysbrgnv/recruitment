@@ -19,26 +19,40 @@ LIMITS = {
     "additional_conditions": 5,
 }
 
-QUERY_SYSTEM = """Ты помогаешь рекрутеру сформировать один точный поисковый запрос для базы резюме HH.
+QUERY_SYSTEM = """Верни только валидный VacancySearchProfile JSON без markdown.
+Поля: role_family, target_functions, accepted_role_titles, mandatory_search_concepts,
+domain_context, preferred_concepts, excluded_role_families, excluded_titles, leadership_intent, rationale.
+Все поля target_functions, accepted_role_titles, domain_context, preferred_concepts,
+excluded_role_families и excluded_titles должны быть JSON-массивами строк, даже если элемент один.
+mandatory_search_concepts всегда массив объектов concept_id/alternatives.
+leadership_intent всегда JSON object строго следующей формы:
+"leadership_intent": {
+  "level": "individual_contributor|leadership|unknown",
+  "evidence": ["конкретный фрагмент вакансии"]
+}
+evidence всегда непустой JSON-массив непустых строк, дословно основанных на вакансии.
+manager, менеджер, lead, ведущий, senior, старший, principal и эксперт сами по себе
+не доказывают leadership. Для leadership нужны сильный title или явное управление людьми/подразделением.
+rationale всегда JSON object строго следующей формы:
+"rationale": {
+  "role_family": "непустое обоснование role_family",
+  "accepted_role_titles": {
+    "точное значение из accepted_role_titles": "функциональное обоснование"
+  },
+  "excluded_titles": {
+    "точное значение из excluded_titles": "обоснование исключения"
+  }
+}
+rationale.accepted_role_titles и rationale.excluded_titles всегда JSON objects, не строки и не списки.
+Если соответствующий top-level список пуст, верни {}. Ключи rationale.accepted_role_titles должны
+точно соответствовать titles, которым требуется обоснование. Не добавляй отсутствующие роли.
+Альтернативные titles должны быть функционально эквивалентны. Business Analyst и System Analyst
+не являются автоматическими синонимами Presales. Sales Engineer, Solution Consultant и
+Руководитель пресейла допустимы при функциональном обосновании. Общие слова manager, lead,
+product, client, B2B, presentation и solution не являются target function сами по себе.
+Не формируй query, не используй NOT и не добавляй отсутствующие в вакансии роли.
+"""
 
-Проанализируй название, описание, задачи и требования вакансии.
-
-Правила:
-- используй точное название основной роли и распространенные прямые синонимы;
-- добавляй альтернативные профессиональные роли только если они прямо указаны в вакансии как допустимый опыт;
-- не добавляй альтернативные роли по собственному предположению;
-- при наличии в вакансии добавляй признаки B2B, enterprise или корпоративных клиентов;
-- добавь 3-6 наиболее отличительных профессиональных компетенций, прямо указанных в вакансии;
-- не путай должность, обязанности, технологии и отрасль;
-- не добавляй отсутствующие в вакансии требования;
-- не используй NOT и не включай город, потому что город передается отдельно через area;
-- используй AND, OR, круглые скобки и кавычки для составных фраз;
-- не перегружай запрос большим количеством условий;
-- discovery и CRM слишком широкие и не должны быть единственными отличительными признаками;
-- для Pre-sales при наличии в вакансии отдавай приоритет RFI, RFP, RFQ, PoC, пилотам, коммерческим предложениям, ТЭО, ROI, бизнес-кейсу, solution consulting, B2B и enterprise;
-- не используй имя, возраст, дату рождения, пол, фотографию, национальность, гражданство, семейное положение, состояние здоровья и адрес.
-
-Верни только одну поисковую строку без JSON, markdown и пояснений."""
 EVALUATION_SYSTEM = """Ты выполняешь предварительное профессиональное сопоставление резюме с вакансией
 как опытный специалист по подбору персонала. Это инструмент поддержки решения, а не автоматическое решение о найме.
 
@@ -154,19 +168,234 @@ def ask(prompt: str, system_prompt: str) -> str:
     return answer
 
 
-def generate_resume_language_query(vacancy: dict) -> str:
-    prompt = (
-        "Сформируй один точный поисковый запрос для HH по вакансии: "
-        + json.dumps(prepare_vacancy(vacancy), ensure_ascii=False, default=str)
-    )
-    query = ask(prompt, QUERY_SYSTEM).strip()
-    query = re.sub(r"^```(?:text)?\s*|\s*```$", "", query, flags=re.I | re.S).strip()
-    if not query:
-        raise AIUnavailableError(
-            "AI-сервис не сформировал поисковый запрос.",
-            request_sent=True,
-        )
+LIST_STRING_FIELDS = {
+    "target_functions", "accepted_role_titles", "domain_context", "preferred_concepts",
+    "excluded_role_families", "excluded_titles",
+}
+SEARCH_PROFILE_FIELDS = {"role_family", "mandatory_search_concepts", "leadership_intent", "rationale"} | LIST_STRING_FIELDS
+GENERIC_FUNCTION_WORDS = {"manager","lead","product","client","b2b","presentation","solution","менеджер","руководитель","продукт","клиент","презентация","решение"}
+PRESALES_ANALYTICS = {"business analyst","бизнес-аналитик","system analyst","системный аналитик","руководитель аналитики","head of analytics","director of data","директор по данным","начальник отдела bi","bi lead"}
+
+
+def _clean_phrase(value):
+    return re.sub(r"\s+", " ", value.replace('"', " ")).strip() if isinstance(value,str) else ""
+
+
+def _normalize_string_list(value,field):
+    if isinstance(value,str):
+        value=[value] if value.strip() else []
+    if not isinstance(value,list):raise ValueError(f"{field} должен быть списком")
+    result=[];seen=set()
+    for item in value:
+        text=_clean_phrase(item)
+        if not text:raise ValueError(f"{field} содержит пустое значение")
+        key=text.casefold()
+        if key not in seen:seen.add(key);result.append(text)
+    return result
+
+
+def normalize_vacancy_search_profile(profile):
+    if not isinstance(profile,dict):raise ValueError("VacancySearchProfile должен быть объектом")
+    normalized=dict(profile)
+    for field in LIST_STRING_FIELDS:
+        if field not in normalized:raise ValueError(f"Отсутствует {field}")
+        normalized[field]=_normalize_string_list(normalized[field],field)
+    return normalized
+
+
+def validate_vacancy_search_profile(profile):
+    profile=normalize_vacancy_search_profile(profile)
+    if set(profile)!=SEARCH_PROFILE_FIELDS:raise ValueError("Неверный набор полей VacancySearchProfile")
+    role_family=_clean_phrase(profile["role_family"])
+    if not role_family:raise ValueError("role_family обязателен")
+    functions=profile["target_functions"]
+    if not functions:raise ValueError("target_functions не может быть пустым")
+    words={w.casefold() for value in functions for w in re.findall(r"[\w+#.-]+",value,re.UNICODE)}
+    if words and words<=GENERIC_FUNCTION_WORDS:raise ValueError("Общие слова не образуют functional core")
+    accepted=profile["accepted_role_titles"];excluded=profile["excluded_titles"]
+    if {x.casefold() for x in accepted}&{x.casefold() for x in excluded}:raise ValueError("accepted и excluded titles пересекаются")
+    concepts=profile["mandatory_search_concepts"]
+    if not isinstance(concepts,list):raise ValueError("mandatory_search_concepts должен быть списком")
+    valid_concepts=[];ids=set()
+    for concept in concepts:
+        if not isinstance(concept,dict) or set(concept)!={"concept_id","alternatives"}:raise ValueError("Неверный mandatory concept")
+        cid=_clean_phrase(concept["concept_id"]);alts=_normalize_string_list(concept["alternatives"],"alternatives")
+        if not cid or cid.casefold() in ids or not alts:raise ValueError("concept_id должен быть уникальным, alternatives непустым")
+        ids.add(cid.casefold());valid_concepts.append({"concept_id":cid,"alternatives":alts})
+    leadership=profile["leadership_intent"]
+    if not isinstance(leadership,dict) or set(leadership)!={"level","evidence"}:raise ValueError("Неверный leadership_intent")
+    leadership_level=leadership["level"]
+    if leadership_level not in {"individual_contributor","leadership","unknown"}:raise ValueError("Неверный leadership level")
+    if not isinstance(leadership["evidence"],list):raise ValueError("leadership_intent.evidence должен быть списком")
+    leadership_evidence=_normalize_string_list(leadership["evidence"],"leadership_intent.evidence")
+    if not leadership_evidence:raise ValueError("leadership_intent.evidence не может быть пустым")
+    profile["leadership_intent"]={"level":leadership_level,"evidence":leadership_evidence}
+    rationale=profile["rationale"]
+    if not isinstance(rationale,dict) or set(rationale)!={"role_family","accepted_role_titles","excluded_titles"}:raise ValueError("Неверный rationale")
+    if not _clean_phrase(rationale["role_family"]) or not isinstance(rationale["accepted_role_titles"],dict) or not isinstance(rationale["excluded_titles"],dict):raise ValueError("rationale обязателен")
+    reasons={_clean_phrase(k).casefold():_clean_phrase(v) for k,v in rationale["accepted_role_titles"].items()}
+    excluded_reasons={_clean_phrase(k).casefold():_clean_phrase(v) for k,v in rationale["excluded_titles"].items()}
+    if any(not excluded_reasons.get(x.casefold()) for x in excluded):raise ValueError("Для excluded title требуется rationale")
+    is_presales=any(x in role_family.casefold() for x in ("presale","pre-sale","пресейл"))
+    if is_presales:
+        for title in accepted:
+            key=title.casefold();reason=reasons.get(key,"").casefold()
+            if key in PRESALES_ANALYTICS:
+                if key in {"руководитель аналитики","head of analytics","director of data","директор по данным","начальник отдела bi","bi lead"} or not any(x in reason for x in ("presale","pre-sale","пресейл","discovery","демонстрац","сделк")):raise ValueError("Аналитическая роль не является автоматическим синонимом Presales")
+            if key in {"sales engineer","solution consultant"} and not reason:raise ValueError("Для альтернативного Presales title требуется rationale")
+    result=dict(profile);result["role_family"]=role_family;result["mandatory_search_concepts"]=valid_concepts
+    return result
+
+
+def _quote(value):
+    value=_clean_phrase(value)
+    if not value:raise ValueError("Пустая фраза")
+    return f'"{value}"'
+
+
+def validate_hh_query_syntax(query,max_length=1800):
+    if not isinstance(query,str) or not query.strip() or "\n" in query or "\r" in query:raise ValueError("HH query должен быть непустой одной строкой")
+    query=query.strip()
+    if len(query)>max_length:raise ValueError("HH query слишком длинный")
+    depth=0;quoted=False;outside=[]
+    for char in query:
+        if char=='"':quoted=not quoted;outside.append(" ")
+        elif quoted:outside.append(" ")
+        else:
+            if char=='(':depth+=1
+            elif char==')':
+                depth-=1
+                if depth<0:raise ValueError("Несбалансированные скобки")
+            outside.append(char)
+    if quoted:raise ValueError("Несбалансированные кавычки")
+    if depth:raise ValueError("Несбалансированные скобки")
+    plain="".join(outside)
+    if re.search(r"\(\s*\)",query):raise ValueError("Пустая группа")
+    if re.search(r"\b(?:AND|OR)\s+(?:AND|OR)\b",query,re.I):raise ValueError("Двойной оператор")
+    if re.match(r"^\s*(?:AND|OR)\b",plain,re.I) or re.search(r"\b(?:AND|OR)\s*$",plain,re.I):raise ValueError("Ведущий или завершающий оператор")
+    if re.search(r"\bNOT\b",plain,re.I):raise ValueError("NOT запрещен")
+    if not re.search(r'"[^"\n]+"',query):raise ValueError("Нет title или functional core")
     return query
+
+
+FUNCTION_ACTION_MARKERS = (
+    "выявлен", "квалификац", "демонстрац", "защит", "подготов", "сопровожд", "сбор",
+    "разработ", "проектир", "внедрен", "эксплуатац", "настро", "анализ",
+    "discovery", "qualif", "demonstrat", "demo", "present", "defend", "elicitation",
+    "prepare", "develop", "design", "implement", "operate", "maintain", "support",
+)
+FUNCTIONAL_NOUN_PHRASES = {
+    "network operations", "incident management", "service delivery", "solution architecture",
+    "poc", "proof of concept", "пилот", "бизнес-задачи", "боли клиента", "критерии успеха",
+}
+BARE_PRESALES_TERMS = {
+    "pre-sale", "pre-sales", "presale", "presales", "пресейл",
+    "pre sale", "pre sales",
+}
+GENERIC_CONTEXT_TERMS = (GENERIC_FUNCTION_WORDS - {"b2b"}) | {
+    "pre-sale", "pre-sales", "presale", "presales", "пресейл",
+}
+
+
+def _has_function_action(value):
+    normalized=_clean_phrase(value).casefold()
+    return normalized in FUNCTIONAL_NOUN_PHRASES or any(marker in normalized for marker in FUNCTION_ACTION_MARKERS)
+
+
+def _is_functional_concept(concept,accepted_titles):
+    title_keys={title.casefold() for title in accepted_titles}
+    alternatives=concept["alternatives"]
+    if not alternatives:return False
+    for alternative in alternatives:
+        key=alternative.casefold()
+        if key in title_keys or key in BARE_PRESALES_TERMS:continue
+        if _has_function_action(alternative):return True
+    return False
+
+
+def _context_terms(profile,limit=6):
+    result=[];seen=set()
+    for value in profile["domain_context"]:
+        key=value.casefold()
+        if key in seen or key in GENERIC_CONTEXT_TERMS:continue
+        seen.add(key);result.append(value)
+        if len(result)>=limit:break
+    return result
+
+
+LEADERSHIP_TITLE_MARKERS = (
+    "head", "lead", "director", "chief", "руководитель", "начальник", "директор",
+)
+
+
+def _is_leadership_title(value):
+    normalized=_clean_phrase(value).casefold()
+    return any(re.search(rf"(?:^|\W){re.escape(marker)}(?:$|\W)", normalized) for marker in LEADERSHIP_TITLE_MARKERS)
+
+
+def _render_titles(profile,vacancy_name):
+    titles=profile["accepted_role_titles"]
+    source=_clean_phrase(vacancy_name).casefold()
+    if not source or _is_leadership_title(source):return titles
+    return [title for title in titles if not _is_leadership_title(title) or title.casefold() in source]
+
+
+def _functional_terms(profile,titles,limit=8):
+    title_keys={title.casefold() for title in titles};result=[];seen=set();selected=0
+    for concept in profile["mandatory_search_concepts"]:
+        alternatives=[]
+        for value in concept["alternatives"]:
+            key=value.casefold()
+            if key in title_keys or key in BARE_PRESALES_TERMS:continue
+            if _has_function_action(value):alternatives.append(value)
+        if not alternatives:continue
+        selected+=1
+        for value in alternatives:
+            key=value.casefold()
+            if key not in seen:seen.add(key);result.append(value)
+            if len(result)>=limit:return result
+        if selected>=2:break
+    if result:return result
+    for value in profile["target_functions"]:
+        key=value.casefold()
+        if key not in title_keys and key not in BARE_PRESALES_TERMS and key not in seen and _has_function_action(value):
+            seen.add(key);result.append(value)
+        if len(result)>=limit:break
+    return result
+
+
+def render_hh_query(profile,vacancy_name=None):
+    profile=validate_vacancy_search_profile(profile);groups=[]
+    titles=_render_titles(profile,vacancy_name)
+    if titles:groups.append("("+" OR ".join(_quote(x) for x in titles)+")")
+    functional=_functional_terms(profile,titles)
+    if functional:groups.append("("+" OR ".join(_quote(x) for x in functional)+")")
+    context=_context_terms(profile)
+    if context:groups.append("("+" OR ".join(_quote(x) for x in context)+")")
+    query=" AND ".join(groups);return validate_hh_query_syntax(query)
+
+
+def safe_vacancy_title_fallback(vacancy):
+    prepared=prepare_vacancy(vacancy);title=_clean_phrase(prepared.get("name") if isinstance(prepared,dict) else "")
+    if not title:raise AIUnavailableError("У вакансии отсутствует безопасное название для HH-запроса.",request_sent=False)
+    return validate_hh_query_syntax(_quote(title))
+
+
+def generate_vacancy_search_plan(vacancy: dict) -> dict:
+    prepared=prepare_vacancy(vacancy)
+    prompt="Сформируй VacancySearchProfile JSON по вакансии: "+json.dumps(prepared,ensure_ascii=False,default=str)
+    raw=re.sub(r"^```(?:json)?\s*|\s*```$","",ask(prompt,QUERY_SYSTEM).strip(),flags=re.I|re.S).strip()
+    try:
+        profile=validate_vacancy_search_profile(json.loads(raw))
+        query=render_hh_query(profile,prepared.get("name") if isinstance(prepared,dict) else None)
+        return {"profile":profile,"query":query}
+    except (ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+        logger.warning("VacancySearchProfile отклонен; используется безопасный title fallback: %s",exc)
+        return {"profile":None,"query":safe_vacancy_title_fallback(vacancy)}
+
+
+def generate_resume_language_query(vacancy: dict) -> str:
+    return generate_vacancy_search_plan(vacancy)["query"]
 
 def level(total: int) -> str:
     if total >= 85:

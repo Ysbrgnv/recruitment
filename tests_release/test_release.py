@@ -8,7 +8,7 @@ os.environ.update(APP_ENV_FILE=str(Path(TEMP.name)/'source.env'),LOG_DIR=str(Pat
 os.environ.pop('DATABASE_URL',None);os.environ.pop('APP_SCHEMA_MANAGED',None)
 import requests
 import app_state as state,operation_store as ops,tracking_service as tracking
-import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service
+import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service,recruitment_data as recruitment_data_module,recruitment_service as service
 from errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
@@ -42,6 +42,382 @@ class AITests(unittest.TestCase):
         with patch.object(nano,'NANO_GPT_API_KEY','placeholder'),patch.object(nano.requests,'post',return_value=response(200,{'choices':[{'message':{'content':None}}]})):
             with self.assertRaises(AIUnavailableError) as e:nano.ask('p','s')
             self.assertTrue(e.exception.request_sent)
+
+class VacancySearchProfileTests(unittest.TestCase):
+    def profile(self,titles=None,functions=None,concepts=None,role='presales',reasons=None,excluded=None):
+        titles=titles or ['Pre-sales Manager','Sales Engineer','Solution Consultant','Руководитель пресейла'];excluded=excluded or []
+        return {'role_family':role,'leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':functions or ['выявление потребностей','демонстрация решения'],'accepted_role_titles':titles,'mandatory_search_concepts':concepts if concepts is not None else [{'concept_id':'discovery','alternatives':['выявление потребностей','customer discovery']},{'concept_id':'demo','alternatives':['демонстрация решения','solution demo']}],'domain_context':['B2B'],'preferred_concepts':['RFP','RFI','RFQ','PoC','ROI'],'excluded_role_families':[],'excluded_titles':excluded,'rationale':{'role_family':'Функции вакансии','accepted_role_titles':reasons or {'Sales Engineer':'Presales discovery demo сделки','Solution Consultant':'Presales демонстрация сделки','Руководитель пресейла':'Presales руководство'},'excluded_titles':{x:'Иное направление' for x in excluded}}}
+    def test_presales_analyst_titles_without_rationale_are_rejected(self):
+        for title in ('Business Analyst','System Analyst'):
+            with self.subTest(title=title):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(self.profile([title],reasons={}))
+    def test_presales_alternative_titles_are_preserved(self):
+        query=nano.render_hh_query(self.profile())
+        for title in ('Sales Engineer','Solution Consultant','Руководитель пресейла'):self.assertIn(f'"{title}"',query)
+    def test_accepted_and_excluded_overlap_is_rejected(self):
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(self.profile(['Руководитель аналитики'],excluded=['Руководитель аналитики']))
+    def test_generic_words_do_not_form_core(self):
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(self.profile(functions=['B2B','product','client'],concepts=[]))
+    def test_discovery_and_demo_groups_are_rendered(self):
+        query=nano.render_hh_query(self.profile());self.assertIn('customer discovery',query);self.assertIn('solution demo',query)
+    def test_preferred_terms_are_not_hard_filters(self):
+        query=nano.render_hh_query(self.profile())
+        for value in ('RFP','RFI','RFQ','PoC','ROI'):self.assertNotIn(f'"{value}"',query)
+    def test_cross_domain_profiles_do_not_gain_presales_terms(self):
+        cases=[self.profile(['Backend Developer'],['разработка backend API'],[{'concept_id':'api','alternatives':['backend API']}],'backend',{}),self.profile(['Business Analyst'],['сбор бизнес-требований'],[{'concept_id':'requirements','alternatives':['сбор бизнес-требований']}],'business_analysis',{})]
+        for profile in cases:self.assertNotRegex(nano.render_hh_query(profile).lower(),r'presale|sales engineer|solution consultant|rfp')
+    def test_network_manager_keeps_function(self):
+        query=nano.render_hh_query(self.profile(['Network Operations Manager'],['эксплуатация сети'],[{'concept_id':'network','alternatives':['network operations']}],'network_operations',{}));self.assertIn('network operations',query)
+    def test_deterministic_dedup_preserves_first(self):
+        profile=self.profile(['Sales Engineer','sales engineer','Solution Consultant'],concepts=[{'concept_id':'demo','alternatives':['Solution Demo','solution demo']}])
+        first=nano.render_hh_query(profile);self.assertEqual(first,nano.render_hh_query(profile));self.assertEqual(first.count('"Sales Engineer"'),1)
+    def test_syntax_validator_rejects_invalid_queries(self):
+        for query in ('("role"','("role)','() AND "role"','"role" AND OR "function"','"role" AND','NOT "role"'):
+            with self.subTest(query=query):
+                with self.assertRaises(ValueError):nano.validate_hh_query_syntax(query)
+    def test_query_is_one_line(self):
+        query=nano.render_hh_query(self.profile());self.assertNotIn('\n',query);self.assertEqual(nano.validate_hh_query_syntax(query),query)
+
+
+class VacancySearchProfileNormalizationTests(unittest.TestCase):
+    def profile(self,domain_context):
+        return {'role_family':'presales','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['выявление потребностей','демонстрация решения'],'accepted_role_titles':['Pre-sales Manager','Sales Engineer'],'mandatory_search_concepts':[{'concept_id':'discovery','alternatives':['выявление потребностей','customer discovery']},{'concept_id':'demo','alternatives':['демонстрация решения','solution demo']}],'domain_context':domain_context,'preferred_concepts':['RFP'],'excluded_role_families':['analytics_without_presales'],'excluded_titles':[],'rationale':{'role_family':'Presales функции','accepted_role_titles':{'Sales Engineer':'Presales discovery demo сделки'},'excluded_titles':{}}}
+    def vacancy(self):return {'name':'Pre-sale Manager'}
+    def test_domain_context_string_normalizes_to_list(self):
+        self.assertEqual(nano.validate_vacancy_search_profile(self.profile('B2B'))['domain_context'],['B2B'])
+    def test_domain_context_list_is_unchanged(self):
+        self.assertEqual(nano.validate_vacancy_search_profile(self.profile(['B2B','enterprise']))['domain_context'],['B2B','enterprise'])
+    def test_domain_context_null_or_object_is_rejected(self):
+        for value in (None,{'kind':'B2B'},7,True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(self.profile(value))
+    def test_string_accepted_role_title_normalizes_safely(self):
+        profile=self.profile('B2B');profile['accepted_role_titles']='Sales Engineer'
+        self.assertEqual(nano.validate_vacancy_search_profile(profile)['accepted_role_titles'],['Sales Engineer'])
+    def test_mandatory_concepts_object_is_not_normalized(self):
+        profile=self.profile('B2B');profile['mandatory_search_concepts']={'concept_id':'demo','alternatives':['demo']}
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_analyst_titles_still_fail_after_list_normalization(self):
+        for title in ('Business Analyst','System Analyst'):
+            profile=self.profile('B2B');profile['accepted_role_titles']=title;profile['rationale']['accepted_role_titles']={}
+            with self.subTest(title=title):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_string_domain_context_builds_structured_query_without_fallback(self):
+        profile=self.profile('B2B')
+        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            query=nano.generate_resume_language_query(self.vacancy())
+        self.assertEqual(ask.call_count,1);self.assertIn('("Pre-sales Manager" OR "Sales Engineer")',query)
+        functional='("выявление потребностей" OR "customer discovery" OR "демонстрация решения" OR "solution demo")'
+        self.assertIn(functional,query);self.assertIn('("B2B")',query);self.assertEqual(query.count(' AND '),2)
+        self.assertEqual(nano.validate_hh_query_syntax(query),query);self.assertNotEqual(query,'"Pre-sale Manager"')
+    def test_invalid_profile_still_uses_title_fallback_once(self):
+        profile=self.profile(None)
+        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            self.assertEqual(nano.generate_resume_language_query(self.vacancy()),'"Pre-sale Manager"')
+        self.assertEqual(ask.call_count,1)
+
+
+class VacancySearchProfileRationaleTests(unittest.TestCase):
+    def profile(self):
+        return {'role_family':'presales','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['выявление потребностей','демонстрация решения'],'accepted_role_titles':['Pre-sales Manager','Sales Engineer','Solution Consultant'],'mandatory_search_concepts':[{'concept_id':'discovery','alternatives':['выявление потребностей','customer discovery']},{'concept_id':'demo','alternatives':['демонстрация решения','solution demo']}],'domain_context':'B2B','preferred_concepts':['RFP'],'excluded_role_families':['analytics_without_presales'],'excluded_titles':[],'rationale':{'role_family':'Роль сопровождает техническую часть B2B-сделки','accepted_role_titles':{'Sales Engineer':'Presales discovery, demo и сопровождение сделки','Solution Consultant':'Presales демонстрация решения и сопровождение сделки'},'excluded_titles':{}}}
+    def test_exact_rationale_contract_passes(self):
+        validated=nano.validate_vacancy_search_profile(self.profile());self.assertEqual(validated['rationale']['excluded_titles'],{})
+    def test_empty_excluded_titles_requires_empty_object(self):
+        profile=self.profile();profile['rationale']['excluded_titles']=[]
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_nonempty_excluded_title_requires_exact_nonempty_reason(self):
+        profile=self.profile();profile['excluded_titles']=['Руководитель аналитики'];profile['rationale']['excluded_titles']={}
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+        profile['rationale']['excluded_titles']={'Руководитель аналитики':'Иное направление без Presales-функций'}
+        self.assertEqual(nano.validate_vacancy_search_profile(profile)['excluded_titles'],['Руководитель аналитики'])
+    def test_rationale_string_or_list_is_rejected(self):
+        for value in ('общее обоснование',['обоснование']):
+            profile=self.profile();profile['rationale']=value
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_nested_rationale_strings_are_rejected(self):
+        for field in ('accepted_role_titles','excluded_titles'):
+            profile=self.profile();profile['rationale'][field]='общее обоснование'
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_extra_rationale_key_is_rejected(self):
+        profile=self.profile();profile['rationale']['extra']='нельзя'
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_missing_role_family_rationale_is_rejected(self):
+        profile=self.profile();del profile['rationale']['role_family']
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_presales_alternatives_require_exact_functional_rationale(self):
+        for title in ('Sales Engineer','Solution Consultant'):
+            profile=self.profile();profile['accepted_role_titles']=title;profile['rationale']['accepted_role_titles']={title:'Presales discovery, демонстрация решения и сопровождение сделки'}
+            with self.subTest(title=title):self.assertEqual(nano.validate_vacancy_search_profile(profile)['accepted_role_titles'],[title])
+    def test_analyst_titles_without_functional_rationale_are_rejected(self):
+        for title in ('Business Analyst','System Analyst'):
+            profile=self.profile();profile['accepted_role_titles']=title;profile['rationale']['accepted_role_titles']={}
+            with self.subTest(title=title):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_head_of_analytics_is_rejected_even_with_general_reason(self):
+        profile=self.profile();profile['accepted_role_titles']='Head of Analytics';profile['rationale']['accepted_role_titles']={'Head of Analytics':'Опыт управления и работы с клиентами'}
+        with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_exact_full_profile_builds_structured_query_with_one_ai_call(self):
+        profile=self.profile()
+        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            query=nano.generate_resume_language_query({'name':'Pre-sale Manager'})
+        self.assertEqual(ask.call_count,1);self.assertIn('("Pre-sales Manager" OR "Sales Engineer" OR "Solution Consultant")',query)
+        self.assertIn('customer discovery',query);self.assertIn('solution demo',query);self.assertNotEqual(query,'"Pre-sale Manager"')
+    def test_invalid_rationale_uses_safe_fallback_without_second_ai_call(self):
+        profile=self.profile();profile['rationale']='общее обоснование'
+        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            self.assertEqual(nano.generate_resume_language_query({'name':'Pre-sale Manager'}),'"Pre-sale Manager"')
+        self.assertEqual(ask.call_count,1)
+
+
+class VacancySearchProfileContextTests(unittest.TestCase):
+    def profile(self):
+        return {'role_family':'presales','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['выявление потребностей клиента','квалификация сделки','демонстрация и защита решения'],'accepted_role_titles':['Pre-sale менеджер','Пресейл-менеджер','Pre-sales Manager','Sales Engineer','Solution Consultant'],'mandatory_search_concepts':[{'concept_id':'role_variants','alternatives':['pre-sale','pre-sales','presales','пресейл','pre-sale менеджер','пресейл-менеджер']},{'concept_id':'discovery','alternatives':['выявление потребностей','customer discovery','квалификация сделки']},{'concept_id':'demo','alternatives':['демонстрация решения','solution demo','защита решения']}],'domain_context':['B2B','enterprise','корпоративные клиенты'],'preferred_concepts':['RFI','RFP','RFQ','PoC','пилот','коммерческое предложение','бизнес-кейс','ROI','ТЭО'],'excluded_role_families':[],'excluded_titles':[],'rationale':{'role_family':'Presales функции','accepted_role_titles':{'Sales Engineer':'Presales discovery, demo и сопровождение сделки','Solution Consultant':'Presales демонстрация решения и сопровождение сделки'},'excluded_titles':{}}}
+    def test_bare_presales_concept_is_not_function_group_and_titles_stay_in_title_group(self):
+        query=nano.render_hh_query(self.profile());self.assertEqual(query.count('"pre-sale"'),0);self.assertEqual(query.count('"Pre-sales Manager"'),1)
+    def test_discovery_and_demo_share_one_broad_function_group(self):
+        query=nano.render_hh_query(self.profile())
+        functional='("выявление потребностей" OR "customer discovery" OR "квалификация сделки" OR "демонстрация решения" OR "solution demo" OR "защита решения")'
+        self.assertEqual(query.count(functional),1);self.assertNotIn(') AND ("демонстрация решения"',query)
+    def test_domain_context_group_is_one_or_group_and_preferred_is_not_rendered(self):
+        query=nano.render_hh_query(self.profile());context='("B2B" OR "enterprise" OR "корпоративные клиенты")'
+        self.assertIn(context,query);self.assertTrue(query.endswith(context));self.assertEqual(query.count(' AND '),2)
+        for value in ('RFI','RFP','RFQ','PoC','ROI'):self.assertNotIn(f'"{value}"',query)
+    def test_domain_context_is_limited_to_six(self):
+        profile=self.profile();profile['domain_context']=['B2B','enterprise','корпоративные клиенты','телеком','облако','интеграция','лишний']
+        query=nano.render_hh_query(profile);tail=query.rsplit(' AND ',1)[1]
+        self.assertEqual(tail.count('"')//2,6);self.assertNotIn('"лишний"',tail)
+    def test_context_deduplicates_case_insensitively_preserving_first(self):
+        profile=self.profile();profile['domain_context']=['B2B','Enterprise','b2b','enterprise','телеком']
+        query=nano.render_hh_query(profile);tail=query.rsplit(' AND ',1)[1]
+        self.assertEqual(tail,'("B2B" OR "Enterprise" OR "телеком")')
+    def test_generic_context_words_are_not_emitted(self):
+        profile=self.profile();profile['domain_context']=['manager','client','solution','B2B','product','presentation'];profile['preferred_concepts']=['RFP']
+        tail=nano.render_hh_query(profile).rsplit(' AND ',1)[1]
+        self.assertEqual(tail,'("B2B")')
+    def test_cross_domain_profiles_use_only_their_own_context(self):
+        cases=[({'role_family':'backend','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['разработка backend API'],'accepted_role_titles':['Backend Developer'],'mandatory_search_concepts':[{'concept_id':'api','alternatives':['разработка API','backend development']}],'domain_context':['Python','backend'],'preferred_concepts':['FastAPI'],'excluded_role_families':[],'excluded_titles':[],'rationale':{'role_family':'Backend функции','accepted_role_titles':{},'excluded_titles':{}}},('Python','backend')),({'role_family':'business_analysis','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['сбор бизнес-требований'],'accepted_role_titles':['Business Analyst'],'mandatory_search_concepts':[{'concept_id':'requirements','alternatives':['сбор бизнес-требований','requirements elicitation']}],'domain_context':['финтех','бизнес-процессы'],'preferred_concepts':['BPMN'],'excluded_role_families':[],'excluded_titles':[],'rationale':{'role_family':'Аналитические функции','accepted_role_titles':{},'excluded_titles':{}}},('финтех','бизнес-процессы'))]
+        for profile,expected in cases:
+            query=nano.render_hh_query(profile)
+            for value in expected:self.assertIn(f'"{value}"',query)
+            self.assertNotRegex(query.lower(),r'presale|pre-sale|sales engineer|rfp|poc')
+            for preferred in profile['preferred_concepts']:self.assertNotIn(f'"{preferred}"',query)
+    def test_network_operations_keeps_network_function_and_context(self):
+        profile={'role_family':'network_operations','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['эксплуатация сетевой инфраструктуры'],'accepted_role_titles':['Network Operations Manager'],'mandatory_search_concepts':[{'concept_id':'network','alternatives':['network operations','эксплуатация сетевой инфраструктуры']}],'domain_context':['телеком','корпоративная сеть'],'preferred_concepts':['NOC'],'excluded_role_families':[],'excluded_titles':[],'rationale':{'role_family':'Сетевая эксплуатация','accepted_role_titles':{},'excluded_titles':{}}}
+        query=nano.render_hh_query(profile);self.assertIn('эксплуатация сетевой инфраструктуры',query);self.assertIn('("телеком" OR "корпоративная сеть")',query);self.assertNotIn('"NOC"',query)
+    def test_empty_context_adds_no_empty_group(self):
+        profile=self.profile();profile['domain_context']=[];profile['preferred_concepts']=[]
+        query=nano.render_hh_query(profile);functional='("выявление потребностей" OR "customer discovery" OR "квалификация сделки" OR "демонстрация решения" OR "solution demo" OR "защита решения")'
+        self.assertNotIn('()',query);self.assertEqual(query.count(' AND '),1);self.assertEqual(query.count(functional),1);self.assertEqual(nano.validate_hh_query_syntax(query),query)
+    def test_no_not_and_query_is_deterministic_and_valid(self):
+        profile=self.profile();first=nano.render_hh_query(profile);self.assertEqual(first,nano.render_hh_query(profile));self.assertNotRegex(first,r'\bNOT\b');self.assertEqual(nano.validate_hh_query_syntax(first),first)
+    def test_safe_fallback_is_unchanged(self):
+        self.assertEqual(nano.safe_vacancy_title_fallback({'name':'Pre-sale Manager'}),'"Pre-sale Manager"')
+
+
+class VacancySearchPlanLeadershipTests(unittest.TestCase):
+    def profile(self,level="individual_contributor",evidence=None):
+        return {"role_family":"presales","leadership_intent":{"level":level,"evidence":evidence or ["Вакансия описывает выполнение Presales-функций без управления подразделением."]},"target_functions":["выявление потребностей","демонстрация решения"],"accepted_role_titles":["Pre-sales Manager","Sales Engineer"],"mandatory_search_concepts":[{"concept_id":"discovery","alternatives":["выявление потребностей","customer discovery"]},{"concept_id":"demo","alternatives":["демонстрация решения","solution demo"]}],"domain_context":["B2B"],"preferred_concepts":["RFP"],"excluded_role_families":[],"excluded_titles":[],"rationale":{"role_family":"Presales-функции","accepted_role_titles":{"Sales Engineer":"Presales discovery и demo"},"excluded_titles":{}}}
+    def test_exact_leadership_intent_contract_passes(self):
+        validated=nano.validate_vacancy_search_profile(self.profile("leadership",["Управление командой Presales."]))
+        self.assertEqual(validated["leadership_intent"],{"level":"leadership","evidence":["Управление командой Presales."]})
+    def test_invalid_leadership_intent_shapes_are_rejected(self):
+        invalid=[None,"leadership",[],{"level":"leadership"},{"level":"invalid","evidence":["x"]},{"level":"unknown","evidence":[]},{"level":"unknown","evidence":"не список"},{"level":"unknown","evidence":["x"],"extra":True}]
+        for value in invalid:
+            profile=self.profile();profile["leadership_intent"]=value
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
+    def test_generate_search_plan_uses_one_ai_call(self):
+        profile=self.profile()
+        with patch.object(nano,"ask",return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            plan=nano.generate_vacancy_search_plan({"name":"Pre-sale Manager"})
+        self.assertEqual(ask.call_count,1);self.assertEqual(plan["profile"]["leadership_intent"]["level"],"individual_contributor");self.assertEqual(plan["query"].count(" AND "),2)
+    def test_compatibility_wrapper_returns_only_query_with_one_ai_call(self):
+        profile=self.profile()
+        with patch.object(nano,"ask",return_value=json.dumps(profile,ensure_ascii=False)) as ask:
+            query=nano.generate_resume_language_query({"name":"Pre-sale Manager"})
+        self.assertEqual(ask.call_count,1);self.assertIsInstance(query,str);self.assertIn('("B2B")',query)
+    def test_invalid_profile_preserves_safe_fallback(self):
+        with patch.object(nano,"ask",return_value='{"invalid":true}') as ask:
+            plan=nano.generate_vacancy_search_plan({"name":"Pre-sale Manager"})
+        self.assertEqual(ask.call_count,1);self.assertIsNone(plan["profile"]);self.assertEqual(plan["query"],'"Pre-sale Manager"')
+
+
+class CurrentOrLatestExperienceTests(unittest.TestCase):
+    def role(self,position,start,end,description="",company="Company"):
+        return {"position":position,"start":start,"end":end,"description":description,"company":company}
+    def test_ongoing_role_is_selected_even_when_not_first(self):
+        resume={"experience":[self.role("Old Director","2018-01-01","2022-01-01"),self.role("Solution Consultant","2023-01-01",None)]}
+        result=recruitment_data_module.select_current_or_latest_experience(resume)
+        self.assertEqual(result["status"],"current");self.assertEqual(result["title"],"Solution Consultant")
+    def test_latest_end_date_wins_when_no_ongoing_role(self):
+        resume={"experience":[self.role("Older","2020-01","2021-01"),self.role("Latest","2021-02","2024-03")]}
+        result=recruitment_data_module.select_current_or_latest_experience(resume)
+        self.assertEqual(result["status"],"latest");self.assertEqual(result["title"],"Latest")
+    def test_first_item_is_not_assumed_current(self):
+        resume={"experience":[self.role("First but old","2010","2012"),self.role("Second and latest","2020","2024")]}
+        self.assertEqual(recruitment_data_module.select_current_or_latest_experience(resume)["title"],"Second and latest")
+    def test_equal_end_uses_latest_start_and_full_tie_is_unknown(self):
+        resume={"experience":[self.role("A","2020-01","2024-01"),self.role("B","2022-01","2024-01")]}
+        self.assertEqual(recruitment_data_module.select_current_or_latest_experience(resume)["title"],"B")
+        tied={"experience":[self.role("A","2022-01","2024-01"),self.role("B","2022-01","2024-01")]}
+        self.assertEqual(recruitment_data_module.select_current_or_latest_experience(tied)["status"],"unknown")
+    def test_multiple_conflicting_ongoing_roles_are_unknown(self):
+        resume={"experience":[self.role("Solution Consultant","2023-01",None),self.role("Head of Analytics","2024-01",None)]}
+        self.assertEqual(recruitment_data_module.select_current_or_latest_experience(resume)["status"],"unknown")
+    def test_missing_or_invalid_dates_are_unknown_without_crash(self):
+        cases=[{}, {"experience":[]}, {"experience":[self.role("Unknown","bad","also-bad")]}]
+        for resume in cases:
+            with self.subTest(resume=resume):self.assertEqual(recruitment_data_module.select_current_or_latest_experience(resume)["status"],"unknown")
+    def test_resume_title_is_not_used_as_current_role(self):
+        result=recruitment_data_module.select_current_or_latest_experience({"title":"Head of Presales","experience":[]})
+        self.assertEqual(result["status"],"unknown");self.assertIsNone(result["title"])
+    def test_current_role_exposes_responsibilities_and_company(self):
+        result=recruitment_data_module.select_current_or_latest_experience({"experience":[self.role("Solution Consultant","2023-01",None,"<p>Проведение demo</p>",{"name":"ACME"})]})
+        self.assertEqual(result["responsibilities"],"Проведение demo");self.assertEqual(result["company"],"ACME")
+
+
+class CandidateLevelClassificationTests(unittest.TestCase):
+    def current(self,title,responsibilities="",status="current"):
+        return {"status":status,"title":title,"responsibilities":responsibilities,"item":{},"company":None,"evidence":[]}
+    def test_strong_leadership_titles_are_leadership(self):
+        for title in ("Head of Analytics","Director of Presales","Chief Revenue Officer","Department Head","Руководитель отдела пресейла","Начальник управления","Директор направления"):
+            with self.subTest(title=title):self.assertEqual(recruitment_data_module.classify_candidate_level(self.current(title))["level"],"leadership")
+    def test_explicit_management_responsibility_proves_leadership(self):
+        for text in ("Управление командой из 8 человек","Руководство подразделением","People management and hiring","5 direct reports","Performance management responsibility"):
+            with self.subTest(text=text):self.assertEqual(recruitment_data_module.classify_candidate_level(self.current("Consultant",text))["level"],"leadership")
+    def test_presale_and_general_manager_titles_are_individual_contributors(self):
+        for title in ("Pre-sale Manager","Product Manager","Account Manager","Project Manager"):
+            with self.subTest(title=title):self.assertEqual(recruitment_data_module.classify_candidate_level(self.current(title))["level"],"individual_contributor")
+    def test_ambiguous_lead_titles_without_management_are_unknown(self):
+        for title in ("Lead Engineer","Ведущий инженер","Team Manager"):
+            with self.subTest(title=title):self.assertEqual(recruitment_data_module.classify_candidate_level(self.current(title))["level"],"unknown")
+    def test_current_ic_role_is_not_overridden_by_old_leadership(self):
+        resume={"experience":[{"position":"Director of Analytics","start":"2018","end":"2021"},{"position":"Solution Consultant","start":"2022","end":None}]}
+        current=recruitment_data_module.select_current_or_latest_experience(resume)
+        self.assertEqual(recruitment_data_module.classify_candidate_level(current)["level"],"individual_contributor")
+    def test_unknown_current_role_stays_unknown(self):
+        self.assertEqual(recruitment_data_module.classify_candidate_level({"status":"unknown","title":None,"responsibilities":""})["level"],"unknown")
+
+
+class CleanPoolFilteringTests(unittest.TestCase):
+    def profile(self,level="individual_contributor"):
+        return {"role_family":"presales","leadership_intent":{"level":level,"evidence":["Vacancy evidence"]},"target_functions":["выявление потребностей","демонстрация решения"],"accepted_role_titles":["Pre-sales Manager","Sales Engineer","Solution Consultant","Head of Presales"],"mandatory_search_concepts":[{"concept_id":"discovery","alternatives":["discovery","выявление потребностей"]},{"concept_id":"demo","alternatives":["demo","демонстрация решения"]}],"domain_context":["B2B"],"preferred_concepts":[],"excluded_role_families":[],"excluded_titles":[],"rationale":{"role_family":"Presales","accepted_role_titles":{},"excluded_titles":{}}}
+    def resume(self,title,description="",old=None,rid="1"):
+        experience=list(old or [])+[{"position":title,"start":"2024-01","end":None,"description":description}]
+        return {"id":rid,"title":title,"area":{"id":"1"},"experience":experience,"skill_set":[],"professional_roles":[],"total_experience":{"months":60},"alternate_url":f"https://example.invalid/{rid}"}
+    def decision(self,vacancy_level,title,description="",old=None):
+        return service._pool_filter_decision(self.profile(vacancy_level),self.resume(title,description,old))
+    def test_ic_vacancy_excludes_current_leadership(self):
+        for title in ("Head of Analytics","Director of Presales"):
+            keep,reason,*_=self.decision("individual_contributor",title,"Presales discovery and demo" if "Presales" in title else "Analytics leadership")
+            with self.subTest(title=title):self.assertFalse(keep);self.assertIn(reason,{"professional_mismatch","leadership_mismatch"})
+    def test_ic_vacancy_keeps_solution_consultant_and_presale_manager(self):
+        for title in ("Solution Consultant","Pre-sale Manager"):
+            keep,reason,*_=self.decision("individual_contributor",title,"Customer discovery and solution demo")
+            with self.subTest(title=title):self.assertTrue(keep);self.assertIsNone(reason)
+    def test_ambiguous_lead_unknown_is_not_auto_excluded(self):
+        keep,reason,_,candidate,_=self.decision("individual_contributor","Lead Engineer","Presales discovery and demo")
+        self.assertTrue(keep);self.assertIsNone(reason);self.assertEqual(candidate["level"],"unknown")
+    def test_leadership_presales_keeps_matching_head(self):
+        keep,reason,*_=self.decision("leadership","Head of Presales","Presales discovery, demo and team leadership")
+        self.assertTrue(keep);self.assertIsNone(reason)
+    def test_leadership_presales_rejects_head_of_analytics_professionally(self):
+        keep,reason,*_=self.decision("leadership","Head of Analytics","Data analytics and BI")
+        self.assertFalse(keep);self.assertEqual(reason,"professional_mismatch")
+    def test_leadership_vacancy_rejects_ic_by_level(self):
+        keep,reason,*_=self.decision("leadership","Solution Consultant","Presales discovery and demo")
+        self.assertFalse(keep);self.assertEqual(reason,"level_mismatch")
+    def test_unknown_candidate_kept_with_professional_evidence(self):
+        keep,reason,_,candidate,_=self.decision("leadership","Lead Engineer","Presales discovery and demo")
+        self.assertTrue(keep);self.assertIsNone(reason);self.assertEqual(candidate["level"],"unknown")
+    def test_business_analyst_without_presales_is_professional_mismatch(self):
+        keep,reason,*_=self.decision("individual_contributor","Business Analyst","Internal requirements and BPMN")
+        self.assertFalse(keep);self.assertEqual(reason,"professional_mismatch")
+    def test_sales_engineer_and_solution_consultant_with_functions_are_kept(self):
+        for title in ("Sales Engineer","Solution Consultant"):
+            keep,reason,*_=self.decision("individual_contributor",title,"Customer discovery and solution demo")
+            with self.subTest(title=title):self.assertTrue(keep);self.assertIsNone(reason)
+    def test_old_leadership_does_not_exclude_current_solution_consultant(self):
+        old=[{"position":"Director of Analytics","start":"2018","end":"2021","description":"Analytics"}]
+        keep,reason,*_=self.decision("individual_contributor","Solution Consultant","Presales discovery and demo",old)
+        self.assertTrue(keep);self.assertIsNone(reason)
+    def test_legacy_profile_is_conservative(self):
+        decision=service.professional_prefilter(None,self.resume("Head of Analytics"),{"title":"Head of Analytics","responsibilities":""})
+        self.assertEqual(decision["decision"],"keep")
+    def test_pool_filters_before_append_and_updates_metrics_audit(self):
+        resumes={"1":self.resume("Head of Analytics","Analytics leadership",rid="1"),"2":self.resume("Solution Consultant","Presales discovery and demo",rid="2")}
+        metrics={key:0 for key in ("search_items","scanned","already_sent","excluded_city","excluded_experience","load_failed","pool","excluded_professional_mismatch","excluded_leadership_mismatch","excluded_level_mismatch","level_unknown_kept")};audit={}
+        with patch.object(service,"search_resumes",return_value={"items":[{"id":"1","area":{"id":"1"}},{"id":"2","area":{"id":"1"}}],"pages":1}),patch.object(service,"fetch_resume_details",side_effect=lambda rid:resumes[rid]),patch.object(service,"was_sent_to_ai",return_value=False),patch.object(service,"reset_history_cache"):
+            pool=service._search_candidate_pool("v",{}, {"area_id":"1","area_name":"","minimum_experience_months":0},"q",2,2,metrics,lambda *a:None,profile=self.profile(),pool_exclusions=audit)
+        self.assertEqual([x[0] for x in pool],["2"]);self.assertEqual(metrics["excluded_professional_mismatch"],1);self.assertIn("1",audit)
+    def test_scan_budget_is_finite(self):
+        self.assertEqual(service.CLEAN_POOL_SCAN_MULTIPLIER,2)
+
+
+class CleanPoolSearchPlanFlowTests(unittest.TestCase):
+    def test_prepare_query_saves_profile_with_review(self):
+        plan={"profile":{"leadership_intent":{"level":"unknown","evidence":["x"]}},"query":"\"Role\""}
+        with patch.object(service,"validate_nano_settings",return_value=[]),patch.object(service,"fetch_vacancy_details",return_value={"name":"Role"}),patch.object(service,"generate_vacancy_search_plan",return_value=plan),patch.object(service,"set_review") as review,patch.object(service,"update_task") as update:
+            service.prepare_query("v","t","hh")
+        review.assert_called_once_with("t",'"Role"',vacancy_search_profile=plan["profile"]);update.assert_not_called()
+    def test_workflow_metrics_include_clean_pool_counters(self):
+        metrics=workflow._metrics()
+        for key in ("excluded_professional_mismatch","excluded_leadership_mismatch","excluded_level_mismatch","level_unknown_kept"):self.assertIn(key,metrics)
+    def test_complete_checkpoint_contract_keeps_profile_and_exclusions(self):
+        source=Path(workflow.__file__).read_text(encoding="utf-8")
+        self.assertIn("'vacancy_search_profile':profile",source);self.assertIn("'pool_exclusions':pool_exclusions",source);self.assertIn("profile=profile",source)
+
+
+class AtomicReviewPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.db_patch=patch.object(state,'DB_PATH',Path(self.tmp.name)/'atomic-review.db');self.db_patch.start();self.addCleanup(self.db_patch.stop)
+        state.init_db();state.create_task('review-task','vacancy-1',2,'review@example.com','hh')
+    def profile(self):return {'role_family':'presales','leadership_intent':{'level':'individual_contributor','evidence':['Нет управления подразделением.']}}
+    def test_set_review_saves_query_and_profile_in_one_update(self):
+        profile=self.profile()
+        with patch.object(state,'update_task',wraps=state.update_task) as update:
+            state.set_review('review-task','"Pre-sales Manager"',vacancy_search_profile=profile)
+        update.assert_called_once();kwargs=update.call_args.kwargs
+        self.assertEqual(kwargs['query'],'"Pre-sales Manager"');self.assertEqual(kwargs['vacancy_search_profile'],profile);self.assertEqual(kwargs['status'],'waiting_approval')
+    def test_task_contains_profile_immediately_after_set_review(self):
+        profile=self.profile();state.set_review('review-task','"Pre-sales Manager"',vacancy_search_profile=profile)
+        task=state.get_task('review-task');self.assertEqual(task['query'],'"Pre-sales Manager"');self.assertEqual(task['vacancy_search_profile'],profile);self.assertEqual(task['status'],'waiting_approval')
+    def test_legacy_set_review_call_remains_compatible(self):
+        state.set_review('review-task','"Legacy Role"');task=state.get_task('review-task')
+        self.assertEqual(task['query'],'"Legacy Role"');self.assertNotIn('vacancy_search_profile',task)
+    def test_failed_save_does_not_leave_false_review_state(self):
+        original=state._save
+        def fail_after_terminal(con,task):raise RuntimeError('injected save failure')
+        with patch.object(state,'_save',side_effect=fail_after_terminal):
+            with self.assertRaisesRegex(RuntimeError,'injected save failure'):state.set_review('review-task','"Role"',vacancy_search_profile=self.profile())
+        task=state.get_task('review-task');self.assertEqual(task['status'],'queued');self.assertNotIn('query',task);self.assertNotIn('vacancy_search_profile',task)
+    def test_set_review_reaches_terminal_save_with_profile_present(self):
+        profile=self.profile();captured=[];original=state._save
+        def inspect(con,task):captured.append(dict(task));return original(con,task)
+        with patch.object(state,'_save',side_effect=inspect):state.set_review('review-task','"Role"',vacancy_search_profile=profile)
+        self.assertEqual(len(captured),1);self.assertEqual(captured[0]['status'],'waiting_approval');self.assertEqual(captured[0]['vacancy_search_profile'],profile)
+
+
+class AtomicPrepareQueryTests(unittest.TestCase):
+    def test_hh_prepare_calls_set_review_once_with_profile_and_never_updates_after(self):
+        plan={'profile':{'leadership_intent':{'level':'unknown','evidence':['Недостаточно данных.']}},'query':'"Role"'}
+        with patch.object(service,'validate_nano_settings',return_value=[]),patch.object(service,'fetch_vacancy_details',return_value={'name':'Role'}),patch.object(service,'generate_vacancy_search_plan',return_value=plan),patch.object(service,'set_review') as review,patch.object(service,'update_task') as update:
+            service.prepare_query('vacancy','task','hh')
+        review.assert_called_once_with('task','"Role"',vacancy_search_profile=plan['profile']);update.assert_not_called()
+    def test_xray_prepare_does_not_attach_hh_profile(self):
+        with patch.object(service,'validate_nano_settings',return_value=[]),patch.object(service,'fetch_vacancy_details',return_value={'name':'Role','area':{'name':'Almaty'}}),patch.object(state,'get_task',return_value={'xray_sources':[]}) as get_task,patch.object(service,'generate_xray_query',return_value=['Role']) as generate_xray,patch('xray_plan.build_plan',return_value='xray query') as build_plan,patch.object(service,'generate_vacancy_search_plan') as generate_hh_plan,patch.object(service,'set_review') as review,patch.object(service,'update_task') as update:
+            service.prepare_query('vacancy','task','xray')
+        get_task.assert_called_once_with('task');generate_xray.assert_called_once_with({'name':'Role','area':{'name':'Almaty'}})
+        build_plan.assert_called_once();generate_hh_plan.assert_not_called()
+        review.assert_called_once_with('task','xray query',vacancy_search_profile=None);update.assert_not_called()
+    def test_no_post_review_transition_exists_in_prepare_query(self):
+        import inspect
+        source=inspect.getsource(service.prepare_query);after=source.split('set_review',1)[1]
+        self.assertNotIn('update_task(',after)
+
 
 class RelevanceContractTests(unittest.TestCase):
     def payload(self,suitability='suitable',status='met',item_evidence=None):
