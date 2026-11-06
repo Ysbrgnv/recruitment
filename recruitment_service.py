@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 ROLE_STOP_WORDS = {"senior", "middle", "junior", "специалист", "менеджер", "manager", "инженер", "engineer", "developer", "разработчик"}
 PRESALES_MARKERS = ("pre sale", "pre sales", "presale", "presales", "пресейл", "пре сейл")
+TELEMARKETING_CONTRACT_MARKERS = (
+    "телемаркетинг", "телемаркетинга", "телемаркетингу", "телемаркетолог",
+    "оператор исходящих звонков", "оператор исходящего обзвона",
+    "специалист телефонных продаж", "менеджер телефонных продаж",
+)
 
 def _normalize_role_text(value):
     value = str(value or "").casefold().replace("ё", "е")
@@ -60,11 +65,29 @@ def _role_texts(resume):
 def _role_tokens(value):
     return {token for token in re.findall(r"\w+", _normalize_role_text(value), flags=re.UNICODE) if len(token) >= 4 and token not in ROLE_STOP_WORDS}
 
+def _is_telemarketing_contract(variants):
+    return any(
+        "телемаркет" in variant
+        or any(marker in variant for marker in TELEMARKETING_CONTRACT_MARKERS)
+        or ("исходящ" in variant and ("звон" in variant or "обзвон" in variant))
+        or ("телефонн" in variant and "продаж" in variant)
+        for variant in variants
+    )
+
+def _matches_telemarketing_role(text):
+    normalized = _normalize_role_text(text)
+    return bool(
+        "телемаркет" in normalized
+        or ("исходящ" in normalized and ("звон" in normalized or "обзвон" in normalized))
+        or ("телефонн" in normalized and "продаж" in normalized)
+    )
+
 def _role_text_matches(text, variants):
     normalized = _normalize_role_text(text)
     if not normalized: return False
     presales_contract = any(any(marker in variant for marker in PRESALES_MARKERS) for variant in variants)
     if presales_contract and any(marker in normalized for marker in PRESALES_MARKERS): return True
+    if _is_telemarketing_contract(variants) and _matches_telemarketing_role(normalized): return True
     for variant in variants:
         if normalized == variant: return True
         text_tokens = _role_tokens(normalized); variant_tokens = _role_tokens(variant)

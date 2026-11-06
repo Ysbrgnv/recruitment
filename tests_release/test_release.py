@@ -175,6 +175,68 @@ class LeadershipHeadGapTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(reason, 'leadership')
 
+class TelemarketingRoleFamilyTests(unittest.TestCase):
+    QUERY = '("специалист телемаркетинга" OR "специалист по телемаркетингу" OR "телемаркетолог" OR "оператор исходящих звонков" OR "менеджер по телефонным продажам") AND ("исходящие звонки" OR "холодные звонки" OR "телефонные продажи")'
+
+    def resume(self, **values):
+        result = {'id': 'r', 'title': 'Специалист клиентского сервиса', 'area': {'id': '1'}, 'total_experience': {'months': 60}}
+        result.update(values)
+        return result
+
+    def assert_relevant(self, resume):
+        self.assertTrue(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def assert_mismatch(self, resume):
+        self.assertFalse(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def test_telemarketing_positive_titles(self):
+        for title in ('Телемаркетолог', 'Менеджер по телемаркетингу', 'Оператор телемаркетинга', 'Оператор исходящих звонков', 'Специалист по телефонным продажам'):
+            with self.subTest(title=title):
+                self.assert_relevant(self.resume(title=title))
+
+    def test_professional_role_can_prove_telemarketing_relevance(self):
+        self.assert_relevant(self.resume(title='Специалист клиентского сервиса', professional_roles=[{'name': 'Специалист по телемаркетингу'}]))
+
+    def test_current_position_can_prove_telemarketing_relevance(self):
+        self.assert_relevant(self.resume(title='Специалист клиентского сервиса', experience=[{'position': 'Менеджер исходящего обзвона', 'start': '2024-01', 'end': None}]))
+
+    def test_current_telemarketing_position_wins_over_old_unrelated_position(self):
+        self.assert_relevant(self.resume(title='', experience=[{'position': 'Специалист технической поддержки', 'start': '2020-01', 'end': '2021-01'}, {'position': 'Оператор исходящих звонков', 'start': '2024-01', 'end': None}]))
+
+    def test_latest_start_is_used_when_no_current_position(self):
+        self.assert_relevant(self.resume(title='', experience=[{'position': 'Оператор входящей линии', 'start': '2020-01', 'end': '2021-01'}, {'position': 'Менеджер телефонных продаж', 'start': '2024-05', 'end': '2025-01'}]))
+
+    def test_telemarketing_negative_titles(self):
+        for title in ('Оператор входящей линии', 'Оператор call-центра', 'Специалист технической поддержки', 'Менеджер по продажам B2B', 'Менеджер по работе с клиентами'):
+            with self.subTest(title=title):
+                self.assert_mismatch(self.resume(title=title))
+
+    def test_old_telemarketing_position_does_not_override_current_client_service(self):
+        self.assert_mismatch(self.resume(title='Специалист клиентского сервиса', experience=[{'position': 'Телемаркетолог', 'start': '2020-01', 'end': '2021-01'}, {'position': 'Специалист клиентского сервиса', 'start': '2024-01', 'end': None}]))
+
+    def test_pool_skips_mismatches_and_continues_to_telemarketer(self):
+        requirements = {'area_id': '1', 'area_name': '', 'minimum_experience_months': None, 'is_leadership_vacancy': False}
+        metrics = {'scanned': 0, 'search_items': 0, 'already_sent': 0, 'excluded_city': 0, 'excluded_experience': 0, 'excluded_leadership': 0, 'load_failed': 0, 'pool': 0}
+        items = [{'id': 'wrong1', 'area': {'id': '1'}}, {'id': 'wrong2', 'area': {'id': '1'}}, {'id': 'right', 'area': {'id': '1'}}]
+        resumes = {'wrong1': self.resume(id='wrong1', title='Оператор входящей линии'), 'wrong2': self.resume(id='wrong2', title='Менеджер по продажам B2B'), 'right': self.resume(id='right', title='Телемаркетолог')}
+        with patch.object(recruitment_service, 'search_resumes', return_value={'items': items, 'pages': 1}), patch.object(recruitment_service, 'fetch_resume_details', side_effect=lambda resume_id: resumes[resume_id]), patch.object(recruitment_service, 'was_sent_to_ai', return_value=False), patch.object(recruitment_service, 'reset_history_cache'):
+            pool = recruitment_service._search_candidate_pool('v', {}, requirements, self.QUERY, 1, 1, metrics, lambda *args: None)
+        self.assertEqual([candidate[0] for candidate in pool], ['right'])
+        self.assertEqual(metrics['excluded_role_mismatch'], 2)
+        self.assertEqual(metrics['pool'], 1)
+        self.assertEqual(metrics['excluded_city'], 0)
+        self.assertEqual(metrics['excluded_experience'], 0)
+        self.assertEqual(metrics['excluded_leadership'], 0)
+
+    def test_leadership_filter_precedes_telemarketing_role_mismatch(self):
+        requirements = {'area_id': '1', 'area_name': '', 'minimum_experience_months': None, 'is_leadership_vacancy': False}
+        metrics = {'scanned': 0, 'search_items': 0, 'already_sent': 0, 'excluded_city': 0, 'excluded_experience': 0, 'excluded_leadership': 0, 'load_failed': 0, 'pool': 0}
+        with patch.object(recruitment_service, 'search_resumes', return_value={'items': [{'id': 'leader', 'area': {'id': '1'}}], 'pages': 1}), patch.object(recruitment_service, 'fetch_resume_details', return_value=self.resume(id='leader', title='Коммерческий директор')), patch.object(recruitment_service, 'resume_filter_result', return_value=(False, ['leadership'], 'leadership')), patch.object(recruitment_service, 'was_sent_to_ai', return_value=False), patch.object(recruitment_service, 'reset_history_cache'):
+            pool = recruitment_service._search_candidate_pool('v', {}, requirements, self.QUERY, 1, 1, metrics, lambda *args: None)
+        self.assertEqual(pool, [])
+        self.assertEqual(metrics['excluded_leadership'], 1)
+        self.assertNotIn('excluded_role_mismatch', metrics)
+
 class LeadershipCandidateFilterTests(unittest.TestCase):
     VACANCY={'name':'Pre-sale менеджер','area':{'id':'1','name':'Алматы'}}
     def req(self,v=None):return recruitment_data.vacancy_requirements(v or self.VACANCY)
