@@ -237,6 +237,82 @@ class TelemarketingRoleFamilyTests(unittest.TestCase):
         self.assertEqual(metrics['excluded_leadership'], 1)
         self.assertNotIn('excluded_role_mismatch', metrics)
 
+class TelemarketingExperienceEvidenceTests(unittest.TestCase):
+    QUERY = '("специалист телемаркетинга" OR "специалист по телемаркетингу" OR "телемаркетолог" OR "оператор исходящих звонков" OR "менеджер по телефонным продажам") AND ("исходящие звонки" OR "холодные звонки" OR "телефонные продажи")'
+
+    def resume(self, **values):
+        result = {'id': 'r', 'title': 'Специалист клиентского сервиса', 'area': {'id': '1'}, 'total_experience': {'months': 60}}
+        result.update(values)
+        return result
+
+    def entry(self, position, description, start='2024-01', end=None):
+        return {'position': position, 'description': description, 'start': start, 'end': end}
+
+    def assert_relevant(self, resume):
+        self.assertTrue(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def assert_mismatch(self, resume):
+        self.assertFalse(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def test_positive_adjacent_role_and_duty_pairs(self):
+        cases = (self.entry('Оператор call-центра', 'Исходящий/Входящий обзвон клиентов; консультирование клиентов.'), self.entry('Менеджер по продажам', 'Осуществление исходящих звонков. Телефонные звонки с целью продаж.'), self.entry('Менеджер отдела развития продаж', 'Обзвон холодной и теплой базы клиентов с целью открытия счетов.'), self.entry('Оператор колл-центра', 'Принимала входящие и совершала исходящие звонки клиентам. Консультировала клиентов.'))
+        for experience in cases:
+            with self.subTest(position=experience['position']):
+                self.assert_relevant(self.resume(title='', experience=[experience]))
+
+    def test_evidence_from_current_position_description(self):
+        self.assert_relevant(self.resume(title='Оператор call-центра', experience=[self.entry('Оператор call-центра', 'Прием и обработка звонка. Исходящие звонки клиентам.')]))
+
+    def test_latest_start_is_used_when_no_current_position(self):
+        self.assert_relevant(self.resume(title='', experience=[self.entry('Оператор call-центра', 'Только входящие звонки.', '2020-01', '2021-01'), self.entry('Менеджер по продажам', 'Телефонные звонки с целью продаж.', '2024-05', '2025-01')]))
+
+    def test_domain_and_weak_evidence_negatives(self):
+        cases = (self.entry('Администратор', 'Прием входящих запросов и осуществление исходящих звонков.'), self.entry('Менеджер по подбору персонала', 'Обзвон кандидатов, телефонное интервью, холодный поиск кандидатов.'), self.entry('Оператор кол центра взыскания', 'Исходящие звонки заемщикам с целью взыскания задолженности.'), self.entry('Специалист административного отдела', 'Регистрация исходящей корреспонденции; прием и распределение телефонных звонков.'), self.entry('Менеджер по туризму / B2B Operations', 'Обработка заявок, входящие и исходящие звонки.'), self.entry('Оператор call-центра', 'Прием входящих обращений и консультирование клиентов.'), self.entry('Менеджер по продажам', 'Проведение встреч, подготовка коммерческих предложений.'))
+        for experience in cases:
+            with self.subTest(position=experience['position']):
+                self.assert_mismatch(self.resume(title='', experience=[experience]))
+
+    def test_old_evidence_is_ignored_when_current_position_is_irrelevant(self):
+        self.assert_mismatch(self.resume(title='', experience=[self.entry('Оператор call-центра', 'Исходящий обзвон клиентов.', '2020-01', '2021-01'), self.entry('Специалист клиентского сервиса', 'Консультирование клиентов.', '2024-01', None)]))
+
+    def test_role_and_evidence_are_not_joined_across_entries(self):
+        self.assert_mismatch(self.resume(title='', experience=[self.entry('Оператор call-центра', 'Только входящие звонки.', '2024-01', None), self.entry('Администратор', 'Исходящий обзвон клиентов.', '2024-02', None)]))
+
+    def test_missing_description_is_mismatch_for_adjacent_role_only(self):
+        self.assert_mismatch(self.resume(title='', experience=[{'position': 'Оператор call-центра', 'start': '2024-01', 'end': None}]))
+
+    def test_pool_skips_mismatches_and_continues_to_evidence_confirmed_candidate(self):
+        requirements = {'area_id': '1', 'area_name': '', 'minimum_experience_months': None, 'is_leadership_vacancy': False}
+        metrics = {'scanned': 0, 'search_items': 0, 'already_sent': 0, 'excluded_city': 0, 'excluded_experience': 0, 'excluded_leadership': 0, 'load_failed': 0, 'pool': 0}
+        items = [{'id': 'wrong1', 'area': {'id': '1'}}, {'id': 'wrong2', 'area': {'id': '1'}}, {'id': 'right', 'area': {'id': '1'}}]
+        resumes = {'wrong1': self.resume(id='wrong1', title='', experience=[self.entry('Администратор', 'Исходящие звонки.')]), 'wrong2': self.resume(id='wrong2', title='', experience=[self.entry('Оператор call-центра', 'Только входящие звонки.')]), 'right': self.resume(id='right', title='', experience=[self.entry('Оператор call-центра', 'Исходящий обзвон клиентов.')])}
+        with patch.object(recruitment_service, 'search_resumes', return_value={'items': items, 'pages': 1}), patch.object(recruitment_service, 'fetch_resume_details', side_effect=lambda resume_id: resumes[resume_id]), patch.object(recruitment_service, 'was_sent_to_ai', return_value=False), patch.object(recruitment_service, 'reset_history_cache'):
+            pool = recruitment_service._search_candidate_pool('v', {}, requirements, self.QUERY, 1, 1, metrics, lambda *args: None)
+        self.assertEqual([candidate[0] for candidate in pool], ['right'])
+        self.assertEqual(metrics['excluded_role_mismatch'], 2)
+        self.assertEqual(metrics['pool'], 1)
+        self.assertEqual(metrics['excluded_city'], 0)
+        self.assertEqual(metrics['excluded_experience'], 0)
+        self.assertEqual(metrics['excluded_leadership'], 0)
+
+    def test_nonempty_current_position_blocks_resume_title_fallback(self):
+        self.assert_mismatch(self.resume(title='Оператор call-центра', experience=[self.entry('Администратор', 'Осуществление исходящих звонков.')]))
+
+    def test_nonempty_current_position_blocks_professional_role_fallback(self):
+        self.assert_mismatch(self.resume(title='', professional_roles=[{'name': 'Оператор call-центра'}], experience=[self.entry('Администратор', 'Исходящие звонки клиентам.')]))
+
+    def test_recruiter_position_exclusion_precedes_resume_title_fallback(self):
+        self.assert_mismatch(self.resume(title='Оператор call-центра', experience=[self.entry('Менеджер по подбору персонала', 'Обзвон кандидатов.')]))
+
+    def test_collection_position_exclusion_precedes_resume_title_fallback(self):
+        self.assert_mismatch(self.resume(title='Оператор call-центра', experience=[self.entry('Оператор кол центра взыскания', 'Исходящие звонки заемщикам.')]))
+
+    def test_missing_position_uses_resume_title_fallback(self):
+        self.assert_relevant(self.resume(title='Оператор call-центра', experience=[self.entry('', 'Исходящий обзвон клиентов.')]))
+
+    def test_missing_position_uses_professional_role_fallback(self):
+        self.assert_relevant(self.resume(title='', professional_roles=[{'name': 'Оператор call-центра'}], experience=[self.entry('', 'Исходящие звонки клиентам.')]))
+
 class LeadershipCandidateFilterTests(unittest.TestCase):
     VACANCY={'name':'Pre-sale менеджер','area':{'id':'1','name':'Алматы'}}
     def req(self,v=None):return recruitment_data.vacancy_requirements(v or self.VACANCY)

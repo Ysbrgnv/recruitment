@@ -53,11 +53,16 @@ def _normalized_start(value):
     values = [int(item) for item in re.findall(r"\d+", str(value or ""))[:3]]
     return tuple((values + [0, 0, 0])[:3])
 
-def _current_or_latest_positions(resume):
+def _current_or_latest_experience(resume):
     experience = [item for item in resume.get("experience") or [] if isinstance(item, dict)]
     current = [item for item in experience if item.get("end") in (None, "")]
-    selected = current or ([max(experience, key=lambda item: _normalized_start(item.get("start")))] if experience else [])
-    return [item.get("position") or item.get("name") or item.get("title") or "" for item in selected]
+    return current or ([max(experience, key=lambda item: _normalized_start(item.get("start")))] if experience else [])
+
+def _experience_position(item):
+    return item.get("position") or item.get("name") or item.get("title") or ""
+
+def _current_or_latest_positions(resume):
+    return [_experience_position(item) for item in _current_or_latest_experience(resume)]
 
 def _role_texts(resume):
     return [resume.get("title") or "", *_professional_role_names(resume), *_current_or_latest_positions(resume)]
@@ -82,6 +87,57 @@ def _matches_telemarketing_role(text):
         or ("телефонн" in normalized and "продаж" in normalized)
     )
 
+TELEMARKETING_ADJACENT_ROLE_PATTERNS = (
+    r"(?<!\w)(?:call|колл|кол)\s+центр", r"(?<!\w)контакт\s+центр",
+    r"(?<!\w)менеджер\s+по\s+продаж", r"(?<!\w)специалист\s+по\s+продаж",
+    r"(?<!\w)менеджер\s+отдела\s+развития\s+продаж", r"(?<!\w)телефонн\w*\s+продаж",
+)
+TELEMARKETING_DOMAIN_EXCLUSIONS = (
+    "подбор персонала", "рекрутер", "кандидат", "собеседован", "взыскан",
+    "задолжен", "заемщик", "просроч", "административн", "исходящая корреспонденц", "туризм",
+)
+
+def _has_telemarketing_adjacent_role(value):
+    normalized = _normalize_role_text(value)
+    return any(re.search(pattern, normalized, flags=re.UNICODE) for pattern in TELEMARKETING_ADJACENT_ROLE_PATTERNS)
+
+def _has_telemarketing_domain_exclusion(position, description):
+    combined = _normalize_role_text(f"{position} {description}")
+    return any(marker in combined for marker in TELEMARKETING_DOMAIN_EXCLUSIONS)
+
+def _has_telemarketing_duty_evidence(description):
+    normalized = _normalize_role_text(description)
+    return bool(
+        ("исходящ" in normalized and "звон" in normalized)
+        or ("исходящ" in normalized and "обзвон" in normalized)
+        or ("обзвон" in normalized and ("холодн" in normalized or "тепл" in normalized) and "баз" in normalized)
+        or ("телефонн" in normalized and "звон" in normalized and "цел" in normalized and "продаж" in normalized)
+        or ("телефонн" in normalized and "продаж" in normalized)
+        or ("продаж" in normalized and "по телефон" in normalized)
+        or ("холодн" in normalized and "звон" in normalized)
+    )
+
+def _matches_telemarketing_experience(resume):
+    fallback_adjacent_role = any(
+        _has_telemarketing_adjacent_role(value)
+        for value in [resume.get("title") or "", *_professional_role_names(resume)]
+    )
+    for item in _current_or_latest_experience(resume):
+        position = _experience_position(item)
+        description = item.get("description") or ""
+        if _has_telemarketing_domain_exclusion(position, description):
+            continue
+        adjacent_role = (
+            _has_telemarketing_adjacent_role(position)
+            if position.strip()
+            else fallback_adjacent_role
+        )
+        if not adjacent_role:
+            continue
+        if _has_telemarketing_duty_evidence(description):
+            return True
+    return False
+
 def _role_text_matches(text, variants):
     normalized = _normalize_role_text(text)
     if not normalized: return False
@@ -97,7 +153,11 @@ def _role_text_matches(text, variants):
 
 def _resume_role_matches_query(resume, query):
     variants = _leading_role_variants(query)
-    return bool(variants) and any(_role_text_matches(text, variants) for text in _role_texts(resume))
+    if not variants:
+        return False
+    if any(_role_text_matches(text, variants) for text in _role_texts(resume)):
+        return True
+    return _is_telemarketing_contract(variants) and _matches_telemarketing_experience(resume)
 
 
 
