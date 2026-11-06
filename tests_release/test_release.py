@@ -87,6 +87,94 @@ class ResumeQueryValidationTests(unittest.TestCase):
     def invalid_generated(self):
         with self.assertRaises(AIUnavailableError):nano.generate_resume_language_query(self.VACANCY)
 
+class RoleQueryBreadthTests(unittest.TestCase):
+    VACANCY = {'name': 'Pre-sale менеджер', 'area': {'name': 'Алматы'}}
+
+    def test_standalone_presales_variants_are_rejected(self):
+        query = '("pre-sales" OR "пресейл") AND ("RFP" OR "PoC")'
+        with self.assertRaises(AIUnavailableError):
+            nano.validate_resume_language_query(query, self.VACANCY)
+
+    def test_full_presales_job_variants_are_accepted(self):
+        query = '("pre-sales manager" OR "пресейл инженер") AND ("RFP" OR "PoC")'
+        self.assertEqual(nano.validate_resume_language_query(query, self.VACANCY), query)
+
+    def test_fullstack_query_remains_accepted(self):
+        vacancy = {'name': 'Senior Fullstack Developer (TypeScript / Node.js)', 'area': {'name': 'Алматы'}}
+        query = '("Senior Fullstack Developer" OR "Senior Full-stack Developer") AND ("TypeScript" OR "Node.js")'
+        self.assertEqual(nano.validate_resume_language_query(query, vacancy), query)
+
+class RoleRelevanceFilterTests(unittest.TestCase):
+    QUERY = '("pre-sale менеджер" OR "presale manager" OR "пресейл инженер") AND ("RFP" OR "PoC")'
+
+    def resume(self, **values):
+        result = {'id': 'r', 'title': 'Менеджер по продажам', 'area': {'id': '1'}, 'total_experience': {'months': 60}}
+        result.update(values)
+        return result
+
+    def test_presales_engineer_title_is_relevant(self):
+        self.assertTrue(recruitment_service._resume_role_matches_query(self.resume(title='Пресейл-инженер'), self.QUERY))
+
+    def test_embedded_presales_family_marker_is_relevant(self):
+        self.assertTrue(recruitment_service._resume_role_matches_query(self.resume(title='BDM | Пресейл | IT-оборудование'), self.QUERY))
+
+    def test_unrelated_titles_are_role_mismatch(self):
+        for title in ('Менеджер по продажам B2B', 'Product Designer'):
+            with self.subTest(title=title):
+                self.assertFalse(recruitment_service._resume_role_matches_query(self.resume(title=title), self.QUERY))
+
+    def test_professional_role_can_prove_relevance(self):
+        self.assertTrue(recruitment_service._resume_role_matches_query(self.resume(title='Менеджер', professional_roles=[{'name': 'Pre-sales Manager'}]), self.QUERY))
+
+    def test_current_position_can_prove_relevance(self):
+        self.assertTrue(recruitment_service._resume_role_matches_query(self.resume(title='Менеджер', experience=[{'position': 'Presales Consultant', 'start': '2024-01', 'end': None}]), self.QUERY))
+
+    def test_old_presales_position_does_not_override_current_product_manager(self):
+        resume = self.resume(title='Product Manager', experience=[{'position': 'Presale Manager', 'start': '2020-01', 'end': '2021-01'}, {'position': 'Product Manager', 'start': '2024-01', 'end': None}])
+        self.assertFalse(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def test_unsorted_experience_prefers_current_end_none(self):
+        resume = self.resume(title='', experience=[{'position': 'Presale Manager', 'start': '2025-01', 'end': '2025-06'}, {'position': 'Product Manager', 'start': '2022-01', 'end': None}])
+        self.assertFalse(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def test_latest_start_is_used_when_no_current_position(self):
+        resume = self.resume(title='', experience=[{'position': 'Product Manager', 'start': '2020-01', 'end': '2021-01'}, {'position': 'Presales Consultant', 'start': '2024-01', 'end': '2025-01'}])
+        self.assertTrue(recruitment_service._resume_role_matches_query(resume, self.QUERY))
+
+    def test_pool_skips_mismatches_and_continues(self):
+        requirements = {'area_id': '1', 'area_name': '', 'minimum_experience_months': None, 'is_leadership_vacancy': False}
+        metrics = {'scanned': 0, 'search_items': 0, 'already_sent': 0, 'excluded_city': 0, 'excluded_experience': 0, 'excluded_leadership': 0, 'load_failed': 0, 'pool': 0}
+        items = [{'id': 'wrong1', 'area': {'id': '1'}}, {'id': 'wrong2', 'area': {'id': '1'}}, {'id': 'right', 'area': {'id': '1'}}]
+        resumes = {'wrong1': self.resume(id='wrong1', title='Product Designer'), 'wrong2': self.resume(id='wrong2', title='Менеджер по продажам B2B'), 'right': self.resume(id='right', title='Presale Manager')}
+        with patch.object(recruitment_service, 'search_resumes', return_value={'items': items, 'pages': 1}), patch.object(recruitment_service, 'fetch_resume_details', side_effect=lambda resume_id: resumes[resume_id]), patch.object(recruitment_service, 'was_sent_to_ai', return_value=False), patch.object(recruitment_service, 'reset_history_cache'):
+            pool = recruitment_service._search_candidate_pool('v', {}, requirements, self.QUERY, 1, 1, metrics, lambda *args: None)
+        self.assertEqual([item[0] for item in pool], ['right'])
+        self.assertEqual(metrics['excluded_role_mismatch'], 2)
+        self.assertEqual(metrics['pool'], 1)
+
+    def test_leadership_exclusion_precedes_role_mismatch(self):
+        requirements = {'area_id': '1', 'area_name': '', 'minimum_experience_months': None, 'is_leadership_vacancy': False}
+        metrics = {'scanned': 0, 'search_items': 0, 'already_sent': 0, 'excluded_city': 0, 'excluded_experience': 0, 'excluded_leadership': 0, 'load_failed': 0, 'pool': 0}
+        resume = self.resume(id='leader', title='Коммерческий директор')
+        with patch.object(recruitment_service, 'search_resumes', return_value={'items': [{'id': 'leader', 'area': {'id': '1'}}], 'pages': 1}), patch.object(recruitment_service, 'fetch_resume_details', return_value=resume), patch.object(recruitment_service, 'resume_filter_result', return_value=(False, ['leadership'], 'leadership')), patch.object(recruitment_service, 'was_sent_to_ai', return_value=False), patch.object(recruitment_service, 'reset_history_cache'):
+            pool = recruitment_service._search_candidate_pool('v', {}, requirements, self.QUERY, 1, 1, metrics, lambda *args: None)
+        self.assertEqual(pool, [])
+        self.assertEqual(metrics['excluded_leadership'], 1)
+        self.assertNotIn('excluded_role_mismatch', metrics)
+
+    def test_non_presales_requires_two_significant_tokens(self):
+        query = '("Senior Fullstack Developer" OR "Senior Full-stack Developer") AND ("TypeScript" OR "Node.js")'
+        self.assertTrue(recruitment_service._resume_role_matches_query(self.resume(title='Senior Fullstack Developer'), query))
+        self.assertFalse(recruitment_service._resume_role_matches_query(self.resume(title='Backend Developer'), query))
+
+class LeadershipHeadGapTests(unittest.TestCase):
+
+    def test_standalone_head_inside_title_requires_recruitment_data_rework(self):
+        requirements = recruitment_data.vacancy_requirements({'name': 'Pre-sale менеджер'})
+        accepted, _, reason = recruitment_data.resume_filter_result({'title': 'IT Delivery Manager (Sen/Head)'}, requirements)
+        self.assertFalse(accepted)
+        self.assertEqual(reason, 'leadership')
+
 class LeadershipCandidateFilterTests(unittest.TestCase):
     VACANCY={'name':'Pre-sale менеджер','area':{'id':'1','name':'Алматы'}}
     def req(self,v=None):return recruitment_data.vacancy_requirements(v or self.VACANCY)
@@ -116,7 +204,7 @@ class LeadershipCandidateFilterTests(unittest.TestCase):
     def test_pool_skips_leader_and_continues_to_next_candidate(self):
         metrics={'scanned':0,'search_items':0,'already_sent':0,'excluded_city':0,'excluded_experience':0,'load_failed':0,'pool':0};items=[{'id':'leader','area':{'id':'1'}},{'id':'engineer','area':{'id':'1'}}];resumes={'leader':self.resume(id='leader',title='Коммерческий директор'),'engineer':self.resume(id='engineer')}
         with patch.object(recruitment_service,'search_resumes',return_value={'items':items,'pages':1}),patch.object(recruitment_service,'fetch_resume_details',side_effect=lambda x:resumes[x]),patch.object(recruitment_service,'was_sent_to_ai',return_value=False),patch.object(recruitment_service,'reset_history_cache'):
-            pool=recruitment_service._search_candidate_pool('v',self.VACANCY,self.req(),'q',1,1,metrics,lambda *a:None)
+            pool=recruitment_service._search_candidate_pool('v',self.VACANCY,self.req(),'("pre-sales manager" OR "пресейл инженер") AND ("RFP" OR "PoC")',1,1,metrics,lambda *a:None)
         self.assertEqual(len(pool),1);self.assertEqual(pool[0][0],'engineer');self.assertEqual(metrics['excluded_leadership'],1);self.assertEqual(metrics['pool'],1)
 
 class RelevanceContractTests(unittest.TestCase):

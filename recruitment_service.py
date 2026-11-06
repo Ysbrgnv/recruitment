@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 
 from app_state import set_review, get_task, update_task
@@ -14,6 +15,67 @@ from settings import (
 from tracking_service import reset_history_cache, was_sent_to_ai
 
 logger = logging.getLogger(__name__)
+
+ROLE_STOP_WORDS = {"senior", "middle", "junior", "специалист", "менеджер", "manager", "инженер", "engineer", "developer", "разработчик"}
+PRESALES_MARKERS = ("pre sale", "pre sales", "presale", "presales", "пресейл", "пре сейл")
+
+def _normalize_role_text(value):
+    value = str(value or "").casefold().replace("ё", "е")
+    value = re.sub(r"[‐‑‒–—−_/\\-]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+def _leading_role_variants(query):
+    query = str(query or "").lstrip()
+    if not query.startswith("("): return []
+    depth = 0; quoted = False
+    for index, char in enumerate(query):
+        if char == '"': quoted = not quoted
+        elif not quoted and char == "(": depth += 1
+        elif not quoted and char == ")":
+            depth -= 1
+            if depth == 0:
+                return [_normalize_role_text(value) for value in re.findall(r'"([^"\r\n]+)"', query[1:index])]
+    return []
+
+def _professional_role_names(resume):
+    values = []
+    for role in resume.get("professional_roles") or []:
+        value = role.get("name") if isinstance(role, dict) else role if isinstance(role, str) else None
+        if value: values.append(value)
+    return values
+
+def _normalized_start(value):
+    values = [int(item) for item in re.findall(r"\d+", str(value or ""))[:3]]
+    return tuple((values + [0, 0, 0])[:3])
+
+def _current_or_latest_positions(resume):
+    experience = [item for item in resume.get("experience") or [] if isinstance(item, dict)]
+    current = [item for item in experience if item.get("end") in (None, "")]
+    selected = current or ([max(experience, key=lambda item: _normalized_start(item.get("start")))] if experience else [])
+    return [item.get("position") or item.get("name") or item.get("title") or "" for item in selected]
+
+def _role_texts(resume):
+    return [resume.get("title") or "", *_professional_role_names(resume), *_current_or_latest_positions(resume)]
+
+def _role_tokens(value):
+    return {token for token in re.findall(r"\w+", _normalize_role_text(value), flags=re.UNICODE) if len(token) >= 4 and token not in ROLE_STOP_WORDS}
+
+def _role_text_matches(text, variants):
+    normalized = _normalize_role_text(text)
+    if not normalized: return False
+    presales_contract = any(any(marker in variant for marker in PRESALES_MARKERS) for variant in variants)
+    if presales_contract and any(marker in normalized for marker in PRESALES_MARKERS): return True
+    for variant in variants:
+        if normalized == variant: return True
+        text_tokens = _role_tokens(normalized); variant_tokens = _role_tokens(variant)
+        overlap = text_tokens & variant_tokens; denominator = min(len(text_tokens), len(variant_tokens))
+        if len(overlap) >= 2 and denominator and len(overlap) / denominator >= 0.5: return True
+    return False
+
+def _resume_role_matches_query(resume, query):
+    variants = _leading_role_variants(query)
+    return bool(variants) and any(_role_text_matches(text, variants) for text in _role_texts(resume))
+
 
 
 def _progress_payload(metrics, target_pool, requested_count):
@@ -75,6 +137,9 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
                     metrics["excluded_city"] += 1
                 else:
                     metrics["excluded_experience"] += 1
+                continue
+            if not _resume_role_matches_query(resume, query):
+                metrics["excluded_role_mismatch"] = metrics.get("excluded_role_mismatch", 0) + 1
                 continue
             if was_sent_to_ai(resume_id, vacancy_id):
                 metrics["already_sent"] += 1

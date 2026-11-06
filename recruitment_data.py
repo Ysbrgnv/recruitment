@@ -16,6 +16,7 @@ LEADERSHIP_MARKERS = (
     "глава направления",
     "заведующий",
     "head of",
+    "head",
     "director",
     "chief",
     "ceo",

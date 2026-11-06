@@ -25,6 +25,8 @@ QUERY_SYSTEM = """Ты помогаешь рекрутеру сформиров�
 
 Правила:
 - используй точное название основной роли и распространенные прямые синонимы;
+- каждый quoted вариант роли должен содержать полноценное должностное значение, а не только функциональный маркер;
+- не используй pre-sale, pre-sales, presale, presales, пресейл или пре-сейл как самостоятельный quoted вариант без должностного компонента;
 - добавляй альтернативные профессиональные роли только если они прямо указаны в вакансии как допустимый опыт;
 - не добавляй альтернативные роли по собственному предположению;
 - при наличии в вакансии добавляй признаки B2B, enterprise или корпоративных клиентов;
@@ -162,7 +164,7 @@ QUERY_MAX_LENGTH = 1000
 QUERY_MAX_TOP_LEVEL_AND = 1
 ROLE_STOP_WORDS = {"senior", "middle", "junior", "lead", "руководитель", "специалист", "менеджер", "инженер", "developer", "разработчик"}
 ROLE_SYNONYM_FAMILIES = (
-    {"предпродаж", "pre sales", "presales", "пресейл"},
+    {"предпродаж", "pre sale", "pre sales", "presale", "presales", "пресейл"},
     {"fullstack", "full stack", "фулстек"},
 )
 
@@ -189,9 +191,14 @@ def _leading_role_group(query: str) -> str:
             if depth==0:return query[1:index]
     return ""
 
+ROLE_FUNCTION_ONLY_VARIANTS = {"pre sale", "pre sales", "presale", "presales", "пресейл", "пре сейл"}
+
+def _role_variant_has_job_meaning(role: str) -> bool:
+    return _normalized_query_text(role) not in ROLE_FUNCTION_ONLY_VARIANTS
+
 def _role_group_matches_vacancy(role_group: str, vacancy_name: str) -> bool:
     roles = re.findall(r'"([^"\r\n]+)"', role_group)
-    if len(roles) < 2:
+    if len(roles) < 2 or any(not _role_variant_has_job_meaning(role) for role in roles):
         return False
     remainder = re.sub(r'"[^"\r\n]+"', "", role_group)
     remainder = re.sub(r"(?<!\w)OR(?!\w)", "", remainder, flags=re.I)
