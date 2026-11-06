@@ -9,6 +9,7 @@ os.environ.pop('DATABASE_URL',None);os.environ.pop('APP_SCHEMA_MANAGED',None)
 import requests
 import app_state as state,operation_store as ops,tracking_service as tracking
 import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service
+import recruitment_data as recruitment_data, recruitment_service as recruitment_service
 from errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
@@ -85,6 +86,38 @@ class ResumeQueryValidationTests(unittest.TestCase):
         with patch.object(nano,'ask',return_value=self.NARROW):self.invalid_generated()
     def invalid_generated(self):
         with self.assertRaises(AIUnavailableError):nano.generate_resume_language_query(self.VACANCY)
+
+class LeadershipCandidateFilterTests(unittest.TestCase):
+    VACANCY={'name':'Pre-sale менеджер','area':{'id':'1','name':'Алматы'}}
+    def req(self,v=None):return recruitment_data.vacancy_requirements(v or self.VACANCY)
+    def resume(self,**kw):
+        r={'id':'r','title':'Пресейл-инженер','area':{'id':'1','name':'Алматы'},'total_experience':{'months':60}};r.update(kw);return r
+    def accepted(self,r,v=None):self.assertEqual(recruitment_data.resume_filter_result(r,self.req(v))[::2],(True,'accepted'))
+    def rejected(self,r,v=None):
+        accepted,notes,reason=recruitment_data.resume_filter_result(r,self.req(v));self.assertFalse(accepted);self.assertEqual(reason,'leadership');self.assertEqual(notes,['Руководящий профиль не соответствует неруководящей вакансии'])
+    def test_non_leadership_vacancy_rejects_commercial_director(self):self.rejected(self.resume(title='Коммерческий директор'))
+    def test_non_leadership_vacancy_rejects_head_of_presales(self):self.rejected(self.resume(title='Head of Pre-sales'))
+    def test_presales_engineer_is_accepted(self):self.accepted(self.resume())
+    def test_leadership_vacancy_accepts_head_of_presales(self):
+        v={'name':'Руководитель отдела Pre-sales','area':{'id':'1','name':'Алматы'}};self.assertTrue(self.req(v)['is_leadership_vacancy']);self.accepted(self.resume(title='Head of Pre-sales'),v)
+    def test_old_leadership_position_does_not_reject_current_individual_contributor(self):self.accepted(self.resume(experience=[{'position':'Руководитель отдела продаж','start':'2018-01','end':'2020-01'},{'position':'Пресейл-инженер','start':'2024-01','end':None}]))
+    def test_current_sales_director_rejected(self):self.rejected(self.resume(experience=[{'position':'Директор по продажам','start':'2024-01','end':None}]))
+    def test_false_positive_titles_are_accepted(self):
+        for x in ('Lead Generation Manager','Ведущий специалист','Project Manager'):
+            with self.subTest(title=x):self.accepted(self.resume(title=x))
+    def test_professional_roles_dict_rejects_leadership(self):self.rejected(self.resume(professional_roles=[{'name':'Руководитель направления'}]))
+    def test_professional_roles_strings_are_supported(self):self.rejected(self.resume(professional_roles=['Head of Pre-sales']))
+    def test_unsorted_experience_prefers_current_position(self):self.accepted(self.resume(experience=[{'position':'Коммерческий директор','start':'2025-01','end':'2025-06'},{'position':'Пресейл-инженер','start':'2022-01','end':None}]))
+    def test_without_current_position_latest_start_is_used(self):
+        self.accepted(self.resume(experience=[{'position':'Директор по продажам','start':'2020-01','end':'2021-01'},{'position':'Пресейл-инженер','start':'2023-05','end':'2024-01'}]));self.rejected(self.resume(experience=[{'position':'Пресейл-инженер','start':'2020-01','end':'2021-01'},{'position':'Директор по продажам','start':'2023-05','end':'2024-01'}]))
+    def test_vacancy_false_positive_phrases_are_not_leadership(self):
+        for x in ('Product Manager','Project Manager','Ведущий специалист','Lead Generation Manager'):
+            with self.subTest(name=x):self.assertFalse(self.req({'name':x})['is_leadership_vacancy'])
+    def test_pool_skips_leader_and_continues_to_next_candidate(self):
+        metrics={'scanned':0,'search_items':0,'already_sent':0,'excluded_city':0,'excluded_experience':0,'load_failed':0,'pool':0};items=[{'id':'leader','area':{'id':'1'}},{'id':'engineer','area':{'id':'1'}}];resumes={'leader':self.resume(id='leader',title='Коммерческий директор'),'engineer':self.resume(id='engineer')}
+        with patch.object(recruitment_service,'search_resumes',return_value={'items':items,'pages':1}),patch.object(recruitment_service,'fetch_resume_details',side_effect=lambda x:resumes[x]),patch.object(recruitment_service,'was_sent_to_ai',return_value=False),patch.object(recruitment_service,'reset_history_cache'):
+            pool=recruitment_service._search_candidate_pool('v',self.VACANCY,self.req(),'q',1,1,metrics,lambda *a:None)
+        self.assertEqual(len(pool),1);self.assertEqual(pool[0][0],'engineer');self.assertEqual(metrics['excluded_leadership'],1);self.assertEqual(metrics['pool'],1)
 
 class RelevanceContractTests(unittest.TestCase):
     def payload(self,suitability='suitable',status='met',item_evidence=None):

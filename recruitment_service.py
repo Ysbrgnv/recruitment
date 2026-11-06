@@ -69,7 +69,12 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
                 continue
             accepted, notes, reason = resume_filter_result(resume, requirements)
             if not accepted:
-                metrics["excluded_city" if reason == "city" else "excluded_experience"] += 1
+                if reason == "leadership":
+                    metrics["excluded_leadership"] = metrics.get("excluded_leadership", 0) + 1
+                elif reason == "city":
+                    metrics["excluded_city"] += 1
+                else:
+                    metrics["excluded_experience"] += 1
                 continue
             if was_sent_to_ai(resume_id, vacancy_id):
                 metrics["already_sent"] += 1
