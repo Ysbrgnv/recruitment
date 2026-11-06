@@ -29,6 +29,9 @@ QUERY_SYSTEM = """Ты помогаешь рекрутеру сформиров�
 - не добавляй альтернативные роли по собственному предположению;
 - при наличии в вакансии добавляй признаки B2B, enterprise или корпоративных клиентов;
 - добавь 3-6 наиболее отличительных профессиональных компетенций, прямо указанных в вакансии;
+- объединяй все профессиональные признаки в одну общую OR-группу; не создавай для них несколько обязательных AND-групп;
+- предпочтительная структура: (основная роль OR прямые синонимы) AND (признак 1 OR признак 2 OR признак 3);
+- используй не более одного обязательного оператора AND верхнего уровня;
 - не путай должность, обязанности, технологии и отрасль;
 - не добавляй отсутствующие в вакансии требования;
 - не используй NOT и не включай город, потому что город передается отдельно через area;
@@ -154,6 +157,107 @@ def ask(prompt: str, system_prompt: str) -> str:
     return answer
 
 
+QUERY_MIN_LENGTH = 3
+QUERY_MAX_LENGTH = 1000
+QUERY_MAX_TOP_LEVEL_AND = 1
+ROLE_STOP_WORDS = {"senior", "middle", "junior", "lead", "руководитель", "специалист", "менеджер", "инженер", "developer", "разработчик"}
+ROLE_SYNONYM_FAMILIES = (
+    {"предпродаж", "pre sales", "presales", "пресейл"},
+    {"fullstack", "full stack", "фулстек"},
+)
+
+def _normalized_query_text(value: str) -> str:
+    value = value.casefold().replace("ё", "е")
+    value = re.sub(r"[‐‑‒–—−_/\\-]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    words = re.findall(r"\w+", _normalized_query_text(phrase), flags=re.UNICODE)
+    if not words:return False
+    pattern = r"(?<!\w)" + r"\s+".join(map(re.escape, words)) + r"(?!\w)"
+    return re.search(pattern, _normalized_query_text(text), flags=re.UNICODE) is not None
+
+def _leading_role_group(query: str) -> str:
+    query=query.lstrip()
+    if not query.startswith("("):return ""
+    depth=0;quoted=False
+    for index,char in enumerate(query):
+        if char=='"':quoted=not quoted
+        elif not quoted and char=="(":depth+=1
+        elif not quoted and char==")":
+            depth-=1
+            if depth==0:return query[1:index]
+    return ""
+
+def _role_group_matches_vacancy(role_group: str, vacancy_name: str) -> bool:
+    roles = re.findall(r'"([^"\r\n]+)"', role_group)
+    if len(roles) < 2:
+        return False
+    remainder = re.sub(r'"[^"\r\n]+"', "", role_group)
+    remainder = re.sub(r"(?<!\w)OR(?!\w)", "", remainder, flags=re.I)
+    if remainder.strip():
+        return False
+    vacancy_text = _normalized_query_text(re.sub(r"\([^)]*\)", " ", vacancy_name))
+    role_texts = [_normalized_query_text(role) for role in roles]
+    if any(role == vacancy_text for role in role_texts):
+        return True
+    if any(
+        any(marker in vacancy_text for marker in family)
+        and any(marker in role for role in role_texts for marker in family)
+        for family in ROLE_SYNONYM_FAMILIES
+    ):
+        return True
+    vacancy_tokens = {
+        token for token in re.findall(r"\w+", vacancy_text, flags=re.UNICODE)
+        if len(token) >= 4 and token not in ROLE_STOP_WORDS
+    }
+    for role in role_texts:
+        role_tokens = {
+            token for token in re.findall(r"\w+", role, flags=re.UNICODE)
+            if len(token) >= 4 and token not in ROLE_STOP_WORDS
+        }
+        matched = vacancy_tokens & role_tokens
+        denominator = min(len(vacancy_tokens), len(role_tokens))
+        if len(matched) >= 2 and denominator and len(matched) / denominator >= 0.5:
+            return True
+    return False
+
+def _top_level_and_count(query: str) -> int:
+    depth=count=index=0;quoted=False
+    while index<len(query):
+        char=query[index]
+        if char=='"':quoted=not quoted;index+=1;continue
+        if not quoted:
+            if char=="(":depth+=1
+            elif char==")":depth-=1
+            elif depth==0:
+                match=re.match(r"(?<![\w])AND(?![\w])",query[index:],flags=re.I)
+                if match:count+=1;index+=len(match.group(0));continue
+        index+=1
+    return count
+
+def validate_resume_language_query(query: str, vacancy: dict) -> str:
+    def invalid(message):raise AIUnavailableError(message,request_sent=True)
+    if not isinstance(query,str) or not query.strip():invalid("AI-сервис не сформировал поисковый запрос.")
+    query=query.strip()
+    if not QUERY_MIN_LENGTH<=len(query)<=QUERY_MAX_LENGTH:invalid("AI-сервис сформировал поисковый запрос недопустимой длины.")
+    if re.search(r"(?<![\w])NOT(?![\w])",query,flags=re.I):invalid("AI-сервис сформировал поисковый запрос с запрещённым оператором NOT.")
+    if query.count('"')%2:invalid("AI-сервис сформировал запрос с несбалансированными кавычками.")
+    depth=0;quoted=False
+    for char in query:
+        if char=='"':quoted=not quoted
+        elif not quoted and char=="(":depth+=1
+        elif not quoted and char==")":
+            depth-=1
+            if depth<0:invalid("AI-сервис сформировал запрос с несбалансированными скобками.")
+    if depth:invalid("AI-сервис сформировал запрос с несбалансированными скобками.")
+    area=str((vacancy.get("area") or {}).get("name") or "").strip()
+    if area and _contains_phrase(query,area):invalid("AI-сервис включил город в поисковый запрос.")
+    vacancy_name=str(vacancy.get("name") or "").strip();role_group=_leading_role_group(query)
+    if not vacancy_name or not role_group or not _role_group_matches_vacancy(role_group,vacancy_name):invalid("AI-сервис не сформировал релевантную обязательную группу целевой роли.")
+    if _top_level_and_count(query)>QUERY_MAX_TOP_LEVEL_AND:invalid("AI-сервис сформировал опасно узкий запрос с несколькими обязательными AND-группами.")
+    return query
+
 def generate_resume_language_query(vacancy: dict) -> str:
     prompt = (
         "Сформируй один точный поисковый запрос для HH по вакансии: "
@@ -161,12 +265,7 @@ def generate_resume_language_query(vacancy: dict) -> str:
     )
     query = ask(prompt, QUERY_SYSTEM).strip()
     query = re.sub(r"^```(?:text)?\s*|\s*```$", "", query, flags=re.I | re.S).strip()
-    if not query:
-        raise AIUnavailableError(
-            "AI-сервис не сформировал поисковый запрос.",
-            request_sent=True,
-        )
-    return query
+    return validate_resume_language_query(query, vacancy)
 
 def level(total: int) -> str:
     if total >= 85:

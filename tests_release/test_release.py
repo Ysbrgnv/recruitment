@@ -43,6 +43,49 @@ class AITests(unittest.TestCase):
             with self.assertRaises(AIUnavailableError) as e:nano.ask('p','s')
             self.assertTrue(e.exception.request_sent)
 
+class ResumeQueryValidationTests(unittest.TestCase):
+    VACANCY={'name':'Pre-sale менеджер','area':{'name':'Алматы'}}
+    SAFE='("Pre-sale менеджер" OR "пресейл менеджер") AND ("RFP" OR "PoC")'
+    NARROW='("Pre-sale менеджер" OR "пресейл менеджер") AND ("RFP" OR "RFI") AND ("PoC" OR "пилот")'
+    def invalid(self,q,v=None):
+        with self.assertRaises(AIUnavailableError) as e:nano.validate_resume_language_query(q,v or self.VACANCY)
+        self.assertTrue(e.exception.request_sent)
+    def test_presales_synonyms(self):
+        v={'name':'Специалист предпродажной поддержки','area':{'name':'Алматы'}};q='("Pre-sales manager" OR "пресейл менеджер") AND ("RFP" OR "PoC" OR "корпоративные клиенты")'
+        self.assertEqual(nano.validate_resume_language_query(q,v),q)
+    def test_fullstack_parenthetical_stack(self):
+        v={'name':'Senior Fullstack Developer (TypeScript / Node.js / Next.js)','area':{'name':'Алматы'}};q='("Senior Fullstack Developer" OR "Senior Full-stack Developer") AND ("TypeScript" OR "Node.js" OR "Next.js")'
+        self.assertEqual(nano.validate_resume_language_query(q,v),q)
+    def test_one_quoted_role_rejected(self):
+        self.invalid('("Pre-sale менеджер") AND ("RFP" OR "PoC")')
+    def test_unquoted_second_role_rejected(self):
+        self.invalid('("Pre-sale менеджер" OR presales) AND ("RFP" OR "PoC")')
+    def test_common_support_token_does_not_prove_presales_role(self):
+        vacancy={'name':'Специалист предпродажной поддержки','area':{'name':'Алматы'}}
+        self.invalid('("Специалист технической поддержки" OR "Support manager") AND ("RFP" OR "PoC")',vacancy)
+    def test_unrelated_role_rejected(self):self.invalid('("Accountant" OR "Controller") AND ("RFP" OR "PoC")')
+    def test_role_group_required(self):self.invalid('"Pre-sale менеджер" AND ("RFP" OR "PoC")')
+    def test_area_boundaries(self):
+        v={'name':'Pre-sale менеджер','area':{'name':'Рим'}}
+        self.invalid('("Pre-sale менеджер" OR "пресейл менеджер") AND ("RFP" OR "Рим")',v)
+        q='("Pre-sale менеджер" OR "пресейл менеджер") AND ("RFP" OR "римский")';self.assertEqual(nano.validate_resume_language_query(q,v),q)
+    def test_and_in_quotes_not_counted(self):
+        q='("Pre-sale менеджер" OR "пресейл менеджер") AND ("research AND development" OR "RFP")';self.assertEqual(nano.validate_resume_language_query(q,self.VACANCY),q)
+    def test_lowercase_and_counted(self):self.invalid('("Pre-sale менеджер" OR "пресейл менеджер") and ("RFP") and ("PoC")')
+    def test_android_not_operator(self):
+        q='("Pre-sale менеджер" OR "пресейл менеджер") AND ("Android" OR "RFP")';self.assertEqual(nano.validate_resume_language_query(q,self.VACANCY),q)
+    def test_early_closing_parenthesis(self):self.invalid(')("Pre-sale менеджер" OR "пресейл менеджер") AND ("RFP")(')
+    def test_not_quotes_empty_long(self):
+        for q in (self.SAFE+' NOT "x"',self.SAFE+' "','', '"Pre-sale менеджер" '+('x'*nano.QUERY_MAX_LENGTH)):
+            with self.subTest(q=q[:20]):self.invalid(q)
+    def test_unbalanced_opening(self):self.invalid(self.SAFE[:-1])
+    def test_generate_safe(self):
+        with patch.object(nano,'ask',return_value=self.SAFE):self.assertEqual(nano.generate_resume_language_query(self.VACANCY),self.SAFE)
+    def test_generate_narrow(self):
+        with patch.object(nano,'ask',return_value=self.NARROW):self.invalid_generated()
+    def invalid_generated(self):
+        with self.assertRaises(AIUnavailableError):nano.generate_resume_language_query(self.VACANCY)
+
 class RelevanceContractTests(unittest.TestCase):
     def payload(self,suitability='suitable',status='met',item_evidence=None):
         if item_evidence is None:item_evidence=['Подтвержден конкретный опыт']
@@ -95,6 +138,18 @@ class WorkflowTests(unittest.TestCase):
         task=state.get_task('t');checkpoint=task['checkpoint']
         if pool is not None:checkpoint={**checkpoint,'pool':pool}
         state.update_task('t',requested_count=count,checkpoint=checkpoint)
+    def test_query_validation_error_after_ai_response_fails_prepare_without_unknown_operation(self):
+        import web_server
+        error=AIUnavailableError('deterministic query validation rejection',request_sent=True)
+        with patch.object(web_server,'prepare_query',side_effect=error),patch.object(web_server.operations,'mark_inflight_unknown') as mark_unknown:
+            web_server.run_task('t',prepare=True)
+        mark_unknown.assert_called_once_with('t')
+        self.assertEqual(ops.unknowns('t'),[])
+        task=state.get_task('t')
+        self.assertEqual(task['status'],'failed')
+        self.assertEqual(task['stage'],'failed')
+        self.assertNotEqual(task['status'],'waiting_manual')
+
     def test_structured_evaluation_is_emailed(self):
         self.set_requested(1,pool=[('r1',{'id':'r1'},[])])
         with patch.object(workflow.service,'_build_candidate_result',side_effect=self.item),patch.object(workflow,'send_candidate_email',return_value='Sent') as mail:
