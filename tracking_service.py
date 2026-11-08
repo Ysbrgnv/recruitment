@@ -4,8 +4,8 @@ import json
 import time
 from datetime import datetime
 from app_state import database
-from errors import TrackerUnavailableError
-from settings import RESERVATION_STALE_MINUTES
+from app.core.errors import TrackerUnavailableError
+from app.core.settings import RESERVATION_STALE_MINUTES
 
 def normalize(value):
     if isinstance(value,float) and value.is_integer():return str(int(value))

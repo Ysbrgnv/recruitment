@@ -10,7 +10,7 @@ import requests
 import app_state as state,operation_store as ops,tracking_service as tracking
 import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service
 import recruitment_data as recruitment_data, recruitment_service as recruitment_service
-from errors import AIUnavailableError,HHUnavailableError
+from app.core.errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 

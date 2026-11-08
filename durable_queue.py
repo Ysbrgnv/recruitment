@@ -35,7 +35,7 @@ def init():
         con.execute("CREATE INDEX IF NOT EXISTS task_jobs_ready ON task_jobs(lane,state,created)")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS task_jobs_one_running ON task_jobs(task_id) WHERE state='running'")
 
-    from telemetry import init as init_metrics
+    from app.core.telemetry import init as init_metrics
     init_metrics()
 
 def enqueue(task_id,prepare=False):
@@ -79,7 +79,7 @@ def claim(lane,lease=45):
 def heartbeat(job,lease=45):
     worker=getattr(_worker_context,'worker_id',None) or os.getenv('WORKER_ID')
     if worker:
-        from telemetry import presence
+        from app.core.telemetry import presence
         presence(worker,job['lane'],'busy')
     with connect() as con:
         return con.execute("UPDATE task_jobs SET lease_until=%s,updated=%s WHERE id=%s AND owner=%s AND state='running'",(time.time()+lease,time.time(),job['id'],job['owner'])).rowcount==1
@@ -98,8 +98,8 @@ def finish_failure(job,retryable,reason):
 def _finish_failure(job,retryable,reason):
     from app_state import get_task,update_task
     import operation_store as ops
-    from retry_policy import maximum,delay
-    from telemetry import increment
+    from app.core.retry_policy import maximum,delay
+    from app.core.telemetry import increment
     ops.mark_inflight_unknown(job['task_id'])
     if ops.unknowns(job['task_id']):
         update_task(job['task_id'],status='waiting_manual',stage='manual_resolution',message='Проверьте исход внешней операции.')
@@ -149,7 +149,7 @@ def reap():
                 state='done'
             elif task['status'] in {'completed','failed','cancelled','expired','waiting_approval','waiting_manual'}:state='done'
             else:
-                from retry_policy import maximum,delay
+                from app.core.retry_policy import maximum,delay
                 if job['attempt']>=maximum():
                     update_task(job['task_id'],status='failed',stage='retry_exhausted',message='Исчерпан лимит восстановлений',finished=time.time());state='dead'
                 else:
@@ -210,12 +210,12 @@ def run_once(lane,runner=None,lease=45):
         if task and task['status']=='failed':finish_failure(job,bool(task.get('error_retryable')),'task_failed')
         else:
             ack(job)
-            from telemetry import increment
+            from app.core.telemetry import increment
             if task and task['status']=='completed':increment('jobs_completed_total')
             elif task and task['status']=='waiting_manual':increment('manual_resolution_total')
     except Exception as exc:
         log.exception('Worker failed',extra={'task_id':job['task_id'],'job_id':job['id']})
-        from retry_policy import transient
+        from app.core.retry_policy import transient
         finish_failure(job,transient(exc),type(exc).__name__)
     finally:
         stop.set()
@@ -227,7 +227,7 @@ def run_once(lane,runner=None,lease=45):
 def worker_loop(lane,stop,index=1):
     worker=uuid.uuid4().hex
     _worker_context.worker_id=worker
-    from telemetry import presence
+    from app.core.telemetry import presence
     try:
         while not stop.is_set():
             try:
@@ -285,7 +285,7 @@ def sync_terminal(con,task):
         if unknown:
             task.update(status='waiting_manual',stage='manual_resolution',message='Проверьте исход внешней операции.')
         elif task.get('error_retryable'):
-            from retry_policy import maximum,delay
+            from app.core.retry_policy import maximum,delay
             if row['attempt']<maximum():
                 state='pending';when=time.time()+delay(row['attempt'])
                 task.update(status='queued',stage='retry_wait',message='Повтор после временной ошибки',error=None,error_retryable=False,retry_at=when)

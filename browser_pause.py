@@ -1,7 +1,7 @@
 """Signal the owner browser thread; HTTP handlers never manipulate Playwright."""
 import time
 from app_state import database,_read,_save,get_task,update_task
-from errors import UserFacingError
+from app.core.errors import UserFacingError
 
 def request_action(task_id,action):
     if action not in {'open','continue','cancel'}:return False
@@ -40,7 +40,7 @@ def wait_for_human(page,task_id,check,timeout=1800,ready=None):
     finally:
         browser_screen.stop(task_id,token)
         if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
-            from telemetry import observe_captcha
+            from app.core.telemetry import observe_captcha
             observe_captcha(time.monotonic()-started)
 
 def _wait_for_human(page,task_id,check,timeout=1800,ready=None,screen_token=None):

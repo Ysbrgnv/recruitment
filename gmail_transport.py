@@ -3,7 +3,7 @@ import os,ssl,smtplib,re
 from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formatdate,make_msgid
-from errors import MailUnavailableError
+from app.core.errors import MailUnavailableError
 
 def secret(name):
     value=os.getenv(name,'').strip();file=os.getenv(name+'_FILE','').strip()

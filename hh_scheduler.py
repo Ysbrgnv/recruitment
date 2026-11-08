@@ -2,7 +2,7 @@
 import logging,threading,time
 from concurrent.futures import ThreadPoolExecutor
 from types import GeneratorType
-from settings import HH_BACKGROUND_WORKERS,HH_AI_WORKERS,HH_MAIL_WORKERS
+from app.core.settings import HH_BACKGROUND_WORKERS,HH_AI_WORKERS,HH_MAIL_WORKERS
 logger=logging.getLogger(__name__)
 class HHScheduler:
     def __init__(self,workers=HH_BACKGROUND_WORKERS,ai_workers=HH_AI_WORKERS,mail_workers=HH_MAIL_WORKERS):

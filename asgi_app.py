@@ -14,12 +14,12 @@ log=logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
-    from logging_setup import configure_logging
+    from app.core.logging_setup import configure_logging
     configure_logging()
     anyio.to_thread.current_default_thread_limiter().total_tokens=16
     from durable_queue import init,reap,reconcile
     from shared_screen import init as screen_init
-    from telemetry import init as metric_init
+    from app.core.telemetry import init as metric_init
     from retention import start_retention
     await anyio.to_thread.run_sync(lambda:(init(),screen_init(),metric_init(),reap(),reconcile()))
     stop,thread=start_retention()
@@ -71,14 +71,14 @@ def metrics(request:Request):
     token=os.getenv('METRICS_TOKEN','')
     if not token or not secrets.compare_digest(request.headers.get('authorization',''),'Bearer '+token):
         return Response(status_code=403)
-    from telemetry import render
+    from app.core.telemetry import render
     return Response(render(),media_type='text/plain; version=0.0.4')
 
 @app.get('/api/tasks/{task_id}/screen/stream')
 async def screen_stream(task_id:str,request:Request):
     import re
     if not re.fullmatch('[a-f0-9]{32}',task_id):return JSONResponse({'error':'Not found'},404)
-    from api_guard import identity,owns
+    from app.core.api_guard import identity,owns
     from app_state import get_task
     import browser_screen
     task=await anyio.to_thread.run_sync(lambda:get_task(task_id))
@@ -141,7 +141,7 @@ async def routes(path:str,request:Request):
         return await anyio.to_thread.run_sync(lambda:dispatch(request.method,target,request.headers.raw,bytes(body)))
     except Exception:
         log.exception('HTTP request failed')
-        from telemetry import increment
+        from app.core.telemetry import increment
         await anyio.to_thread.run_sync(lambda:increment('http_errors_total'))
         return JSONResponse({'error':'Внутренняя ошибка сервера'},500)
 

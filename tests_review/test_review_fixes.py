@@ -4,18 +4,21 @@ from pathlib import Path
 from unittest.mock import patch,Mock
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-import settings as real_settings
+import app.core as core_package
+from app.core import settings as real_settings
 TEMP=tempfile.TemporaryDirectory()
 os.environ['RECRUITMENT_DB_PATH']=str(Path(TEMP.name)/'test.db')
 os.environ.pop('DATABASE_URL',None)
 os.environ['TASK_QUEUE_BACKEND']='local'
-settings=types.ModuleType('settings')
+settings=types.ModuleType('app.core.settings')
 settings.BASE_DIR=Path(TEMP.name);settings.MAX_BACKGROUND_WORKERS=1
 settings.TASK_RETENTION_HOURS=24;settings.RESERVATION_STALE_MINUTES=30
-sys.modules['settings']=settings
+sys.modules['app.core.settings']=settings
+core_package.settings=settings
 import app_state,operation_store as ops,tracking_service,browser_screen
 app_state.init_db();ops.init()
-sys.modules['settings']=real_settings
+sys.modules['app.core.settings']=real_settings
+core_package.settings=real_settings
 def isolated_functions(name,names):
     tree=ast.parse((ROOT/name).read_text())
     nodes=[]
@@ -23,7 +26,7 @@ def isolated_functions(name,names):
         if isinstance(node,ast.FunctionDef) and node.name in names:nodes.append(node)
         if isinstance(node,ast.ClassDef):
             nodes.extend(n for n in node.body if isinstance(n,ast.FunctionDef) and n.name in names)
-    from errors import UserFacingError
+    from app.core.errors import UserFacingError
     env={'UserFacingError':UserFacingError,'re':re,'STATE_LOCK':threading.RLock(),'APP_STATE':{'vacancies':['old'],'vacancy_cache':{},'startup_error':None},'EMPLOYER_ID':'1','logger':logging.getLogger('test'),'DEFAULT_EVALUATION_COUNT':1}
     exec(compile(ast.Module(body=nodes,type_ignores=[]),name,'exec'),env)
     return env

@@ -3,11 +3,11 @@ import re
 import time
 
 from app_state import set_review, get_task, update_task
-from errors import AIUnavailableError, HHUnavailableError
+from app.core.errors import AIUnavailableError, HHUnavailableError
 from hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
 from nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
 from recruitment_data import resume_filter_result, vacancy_requirements
-from settings import (
+from app.core.settings import (
     MAX_CANDIDATE_POOL, POOL_EXTRA, POOL_MULTIPLIER,
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
     validate_nano_settings,
@@ -253,7 +253,7 @@ def prepare_query(vacancy_id, task_id, mode):
         raise AIUnavailableError("Не заполнены настройки AI: " + ", ".join(missing), request_sent=False)
     vacancy = fetch_vacancy_details(vacancy_id)
     if mode == 'xray':
-        from errors import UserFacingError
+        from app.core.errors import UserFacingError
         from app_state import get_task
         from xray_plan import build_plan, DEFAULT_SOURCES, city_name
         task=get_task(task_id)

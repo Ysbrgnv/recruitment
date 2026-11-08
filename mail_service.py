@@ -1,6 +1,6 @@
 import html
 
-from errors import MailUnavailableError
+from app.core.errors import MailUnavailableError
 from gmail_transport import send_html
 
 LABELS = {

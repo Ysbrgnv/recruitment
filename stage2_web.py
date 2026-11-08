@@ -1,4 +1,4 @@
-from runtime_config import load_runtime
+from app.core.runtime_config import load_runtime
 load_runtime()
 if __name__=='__main__':
     import os,uvicorn

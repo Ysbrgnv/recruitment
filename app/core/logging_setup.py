@@ -1,7 +1,7 @@
 """One JSON log file per process; no cross-process RotatingFileHandler races."""
 import json,logging,os,sys
 from logging.handlers import RotatingFileHandler
-from settings import LOG_DIR
+from app.core.settings import LOG_DIR
 
 class JsonFormatter(logging.Formatter):
     def format(self,record):

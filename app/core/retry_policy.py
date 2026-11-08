@@ -4,7 +4,7 @@ import os,random
 def transient(exc):
     import psycopg,requests
     from psycopg_pool import PoolTimeout
-    from errors import AIUnavailableError,MailUnavailableError
+    from app.core.errors import AIUnavailableError,MailUnavailableError
     # AI/mail wrappers may describe a sent request without a complete response.
     # Never infer that such an operation is safe merely from its network cause.
     seen=set();current=exc

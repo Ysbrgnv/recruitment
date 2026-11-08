@@ -5,9 +5,9 @@ from urllib.parse import urlencode
 import requests
 from dotenv import set_key, dotenv_values
 from token_lock import token_file_lock
-from errors import HHUnavailableError
+from app.core.errors import HHUnavailableError
 from app_state import APP_STATE, STATE_LOCK
-from settings import *
+from app.core.settings import *
 
 logger = logging.getLogger(__name__)
 SESSION = requests.Session()

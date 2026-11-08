@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from settings import BASE_DIR, MAX_BACKGROUND_WORKERS, TASK_RETENTION_HOURS
+from app.core.settings import BASE_DIR, MAX_BACKGROUND_WORKERS, TASK_RETENTION_HOURS
 
 DB_PATH = Path(os.getenv("RECRUITMENT_DB_PATH", str(BASE_DIR / "recruitment.db")))
 APP_STATE = {"vacancies": [], "vacancy_cache": {}, "startup_error": None}
@@ -146,7 +146,7 @@ def list_tasks(vacancy_id, owner_session=None):
             return [_read(row) for row in con.execute('SELECT * FROM tasks WHERE vacancy_id=? ORDER BY created DESC LIMIT 20',(vacancy_id,))]
         # Apply ownership before the display limit. Stream rows to avoid
         # requiring SQLite JSON extensions or changing the database schema.
-        from api_guard import owns
+        from app.core.api_guard import owns
         result=[]
         for row in con.execute('SELECT * FROM tasks WHERE vacancy_id=? ORDER BY created DESC',(vacancy_id,)):
             task=_read(row)

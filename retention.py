@@ -3,7 +3,7 @@ Never purge active/manual tasks or ambiguous external effects.
 """
 import json,time,threading,logging
 from app_state import database,expire_reviews
-from settings import TASK_RETENTION_HOURS
+from app.core.settings import TASK_RETENTION_HOURS
 logger=logging.getLogger(__name__)
 def cleanup(now=None):
     now=time.time() if now is None else now

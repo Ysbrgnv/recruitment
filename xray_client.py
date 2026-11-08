@@ -3,7 +3,7 @@ import re
 import logging
 import json
 from urllib.parse import urlparse,urlunparse,urljoin,parse_qs
-from errors import UserFacingError
+from app.core.errors import UserFacingError
 from playwright.sync_api import sync_playwright,Error as BrowserError,TimeoutError as BrowserTimeout
 import threading
 import os
