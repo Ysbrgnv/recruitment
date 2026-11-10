@@ -6,7 +6,7 @@ from psycopg import sql
 from dotenv import load_dotenv
 
 def main():
-    root=Path(__file__).resolve().parent
+    root=Path(__file__).resolve().parents[2]
     load_dotenv(root/'.env.infrastructure')
     admin=os.environ['PG_ADMIN_URL'];app_password=os.environ['APP_DB_PASSWORD'];backup_password=os.environ['BACKUP_DB_PASSWORD']
     env=dict(os.environ,DATABASE_URL=admin,APP_SCHEMA_MANAGED='false',TASK_QUEUE_BACKEND='postgres')

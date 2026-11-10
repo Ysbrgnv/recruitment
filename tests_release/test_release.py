@@ -10,7 +10,7 @@ import requests
 from app.persistence import app_state as state
 from app.persistence import operation_store as ops
 from app.persistence import tracking_service as tracking
-from app.integrations.ai import nano_client as nano; from app.integrations.hh import hh_client as hh; from app.services import workflow; import config_sync; from app.services import mail_service
+from app.integrations.ai import nano_client as nano; from app.integrations.hh import hh_client as hh; from app.services import workflow; from scripts.setup import config_sync; from app.services import mail_service
 from app.services import recruitment_data as recruitment_data; from app.services import recruitment_service as recruitment_service
 from app.core.errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values

@@ -3,7 +3,7 @@ from pathlib import Path
 import sys,secrets,re
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from dotenv import dotenv_values
-from config_sync import allowed,atomic_env
+from scripts.setup.config_sync import allowed,atomic_env
 
 def prepare(root):
     root=Path(root);source=root/'.env';folder=root/'deploy/secrets'

@@ -2,7 +2,7 @@
 import os,sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from config_sync import sync
+from scripts.setup.config_sync import sync
 from app.integrations.hh.token_lock import token_file_lock
 folder=Path('/config');folder.mkdir(exist_ok=True)
 with token_file_lock(folder/'hh.env'):

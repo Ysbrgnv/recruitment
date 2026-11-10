@@ -100,7 +100,7 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--directory',default='backups');args=parser.parse_args()
     def stop(*_):raise KeyboardInterrupt('Backup stopped')
     for sig in [signal.SIGINT,signal.SIGTERM]+([signal.SIGBREAK] if os.name=='nt' else []):signal.signal(sig,stop)
-    root=Path(__file__).resolve().parent;load_dotenv(root/'.env.infrastructure')
+    root=Path(__file__).resolve().parents[2];load_dotenv(root/'.env.infrastructure')
     admin=os.environ['PG_ADMIN_URL'];reader=os.environ['PG_BACKUP_URL']
     directory=Path(args.directory)
     if not directory.is_absolute():directory=root/directory
