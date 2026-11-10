@@ -1,6 +1,6 @@
 """Signal the owner browser thread; HTTP handlers never manipulate Playwright."""
 import time
-from app_state import database,_read,_save,get_task,update_task
+from app.persistence.app_state import database,_read,_save,get_task,update_task
 from app.core.errors import UserFacingError
 
 def request_action(task_id,action):

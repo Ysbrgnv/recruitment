@@ -21,8 +21,8 @@ os.environ.setdefault("TASK_QUEUE_BACKEND", "local")
 os.environ.pop("DATABASE_URL", None)
 os.environ.pop("APP_SCHEMA_MANAGED", None)
 
-import app_state as state
-import operation_store as operations
+from app.persistence import app_state as state
+from app.persistence import operation_store as operations
 import asgi_app
 import web_server
 

@@ -89,9 +89,9 @@ def _reload_app_state(database_url: str):
     os.environ[DATABASE_ENV] = database_url
     os.environ["TASK_QUEUE_BACKEND"] = "postgres"
     os.environ.pop("APP_SCHEMA_MANAGED", None)
-    import db_pool
-    import pg_backend
-    import app_state
+    from app.persistence import db_pool
+    from app.persistence import pg_backend
+    from app.persistence import app_state
 
     # Modules read some runtime settings during import. Reload only the project's
     # database-facing modules, never dotenv/runtime_config.

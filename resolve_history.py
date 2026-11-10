@@ -1,7 +1,7 @@
 """Manual release of an old ambiguous history row with no task journal."""
 import argparse,json,time
-from app_state import database
-import operation_store
+from app.persistence.app_state import database
+from app.persistence import operation_store
 
 def main():
     parser=argparse.ArgumentParser(description='Разрешить повтор старой записи только после проверки внешнего сервиса.')

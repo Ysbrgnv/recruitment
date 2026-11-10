@@ -15,7 +15,7 @@ def submission_transaction():
     if os.getenv('TASK_QUEUE_BACKEND','local')!='postgres':
         yield
         return
-    from app_state import database
+    from app.persistence.app_state import database
     with database() as con:
         con.execute('BEGIN IMMEDIATE')
         yield

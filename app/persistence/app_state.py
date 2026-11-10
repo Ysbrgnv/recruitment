@@ -20,7 +20,7 @@ REVIEW_TTL = max(60, int(os.getenv("QUERY_REVIEW_TTL_SECONDS", "86400")))
 def database():
     url = os.getenv("DATABASE_URL", "").strip()
     if url:
-        from pg_backend import database as pg_database
+        from app.persistence.pg_backend import database as pg_database
         with pg_database(url) as con:
             yield con
         return
@@ -63,7 +63,7 @@ def _read(row):
 
 def _save(con, task):
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
-        from durable_queue import sync_terminal
+        from app.persistence.durable_queue import sync_terminal
         sync_terminal(con,task)
     now=time.time()
     con.execute("UPDATE tasks SET status=?,updated=?,expires=?,data=? WHERE id=?",
@@ -123,7 +123,7 @@ def claim_review(task_id):
         task.update(status='queued',stage='setup',message='Поиск поставлен в очередь',expires=None)
         _save(con,task)
         if os.getenv("TASK_QUEUE_BACKEND","local")=="postgres":
-            from durable_queue import enqueue
+            from app.persistence.durable_queue import enqueue
             enqueue(task_id,False)
     return True
 
@@ -136,7 +136,7 @@ def cancel_review(task_id):
     return True
 
 def recover_tasks():
-    from operation_store import recover
+    from app.persistence.operation_store import recover
     return recover()
 
 def list_tasks(vacancy_id, owner_session=None):

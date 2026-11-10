@@ -64,8 +64,8 @@ def terminate_worker(code=71):
     finally:os._exit(code)
 
 def record_timeout(job,reason):
-    from durable_queue import connect
-    from app_state import get_task,update_task
+    from app.persistence.durable_queue import connect
+    from app.persistence.app_state import get_task,update_task
     with connect() as con:
         con.execute('SELECT pg_advisory_xact_lock(714202601)')
         row=con.execute("SELECT id FROM task_jobs WHERE id=%s AND owner=%s AND state='running' FOR UPDATE",(job['id'],job['owner'])).fetchone()
@@ -78,8 +78,8 @@ def record_timeout(job,reason):
     return True
 
 def watch(job,stop):
-    from durable_queue import connect
-    from app_state import _read
+    from app.persistence.durable_queue import connect
+    from app.persistence.app_state import _read
     clock=ProgressClock();interval=seconds('WATCHDOG_POLL_SECONDS',2,.1,10)
     while not stop.wait(interval):
         try:

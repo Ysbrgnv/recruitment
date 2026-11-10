@@ -1,6 +1,6 @@
 """Cross-process CAPTCHA frames and bounded input. Only Playwright owner pumps input."""
 import json,secrets,time,os
-from durable_queue import connect
+from app.persistence.durable_queue import connect
 
 def init():
     if os.getenv('APP_SCHEMA_MANAGED')=='true':return

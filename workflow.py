@@ -2,9 +2,9 @@
 import json,time
 from datetime import datetime
 import recruitment_service as service
-import operation_store as ops
-from app_state import get_task,update_task,database
-from tracking_service import reserve_for_ai,update_tracking
+from app.persistence import operation_store as ops
+from app.persistence.app_state import get_task,update_task,database
+from app.persistence.tracking_service import reserve_for_ai,update_tracking
 from app.core.errors import AIUnavailableError,MailUnavailableError,UserFacingError
 from mail_service import send_candidate_email,send_xray_email
 from xray_client import search_profiles,canonical_profile

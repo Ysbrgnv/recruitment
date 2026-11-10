@@ -7,7 +7,9 @@ TEMP=tempfile.TemporaryDirectory()
 os.environ.update(APP_ENV_FILE=str(Path(TEMP.name)/'source.env'),LOG_DIR=str(Path(TEMP.name)/'logs'),RECRUITMENT_DB_PATH=str(Path(TEMP.name)/'initial.db'),TASK_QUEUE_BACKEND='local')
 os.environ.pop('DATABASE_URL',None);os.environ.pop('APP_SCHEMA_MANAGED',None)
 import requests
-import app_state as state,operation_store as ops,tracking_service as tracking
+from app.persistence import app_state as state
+from app.persistence import operation_store as ops
+from app.persistence import tracking_service as tracking
 import nano_client as nano,hh_client as hh,workflow,config_sync,mail_service
 import recruitment_data as recruitment_data, recruitment_service as recruitment_service
 from app.core.errors import AIUnavailableError,HHUnavailableError
@@ -804,7 +806,8 @@ class WorkflowTests(unittest.TestCase):
             workflow.run_hh('t',lambda *a:None)
             self.assertEqual(ai.call_count,2);self.assertEqual(mail.call_count,2)
         env=dict(os.environ,RECRUITMENT_DB_PATH=str(state.DB_PATH))
-        code="""import workflow,operation_store as ops
+        code="""import workflow
+from app.persistence import operation_store as ops
 from unittest.mock import patch
 with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email',side_effect=AssertionError('Mail repeated')):
     result=workflow.run_hh('t',lambda *a:None)
@@ -880,14 +883,14 @@ class OperationFinishFencingTests(unittest.TestCase):
         self.job={'id':7,'task_id':'t','owner':'owner-a','state':'running'}
 
     def run_finish(self,oid='ai-op',database=None):
-        from transaction_scope import worker_job,bind
+        from app.persistence.transaction_scope import worker_job,bind
         database=database or self.Database(self.operations,self.jobs)
         with patch.object(ops,'database',return_value=database),patch.dict(os.environ,TASK_QUEUE_BACKEND='postgres'):
             with bind(worker_job,self.job):ops.finish(oid,'succeeded',{'result':'saved'})
         return database
 
     def test_finish_outside_worker_context_keeps_legacy_behavior(self):
-        from transaction_scope import worker_job,bind
+        from app.persistence.transaction_scope import worker_job,bind
         database=self.Database(self.operations,self.jobs)
         with patch.object(ops,'database',return_value=database):
             with bind(worker_job,None):ops.finish('ai-op','succeeded',{'result':'saved'})

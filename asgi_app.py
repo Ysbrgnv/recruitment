@@ -17,7 +17,7 @@ async def lifespan(app):
     from app.core.logging_setup import configure_logging
     configure_logging()
     anyio.to_thread.current_default_thread_limiter().total_tokens=16
-    from durable_queue import init,reap,reconcile
+    from app.persistence.durable_queue import init,reap,reconcile
     from shared_screen import init as screen_init
     from app.core.telemetry import init as metric_init
     from retention import start_retention
@@ -36,7 +36,7 @@ async def lifespan(app):
         if task:
             try:await asyncio.wait_for(asyncio.shield(task),timeout=5)
             except (TimeoutError,asyncio.CancelledError):task.cancel()
-        from db_pool import close_pools
+        from app.persistence.db_pool import close_pools
         await anyio.to_thread.run_sync(close_pools)
 
 app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
@@ -47,7 +47,7 @@ def live():return {'status':'alive'}
 def readiness():
     checks={'database':False,'browser':False,'general_workers':False,'browser_workers':False}
     try:
-        from durable_queue import connect
+        from app.persistence.durable_queue import connect
         with connect() as c:
             c.execute('SELECT next_run,last_error FROM task_jobs LIMIT 0')
             c.execute('SELECT 1 FROM service_counters LIMIT 0');checks['database']=True
@@ -79,7 +79,7 @@ async def screen_stream(task_id:str,request:Request):
     import re
     if not re.fullmatch('[a-f0-9]{32}',task_id):return JSONResponse({'error':'Not found'},404)
     from app.core.api_guard import identity,owns
-    from app_state import get_task
+    from app.persistence.app_state import get_task
     import browser_screen
     task=await anyio.to_thread.run_sync(lambda:get_task(task_id))
     if not owns(task,identity(request.headers)):return JSONResponse({'error':'Задача недоступна для этой сессии.'},403)

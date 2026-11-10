@@ -15,7 +15,10 @@ settings.BASE_DIR=Path(TEMP.name);settings.MAX_BACKGROUND_WORKERS=1
 settings.TASK_RETENTION_HOURS=24;settings.RESERVATION_STALE_MINUTES=30
 sys.modules['app.core.settings']=settings
 core_package.settings=settings
-import app_state,operation_store as ops,tracking_service,browser_screen
+from app.persistence import app_state
+from app.persistence import operation_store as ops
+from app.persistence import tracking_service
+import browser_screen
 app_state.init_db();ops.init()
 sys.modules['app.core.settings']=real_settings
 core_package.settings=real_settings
@@ -92,7 +95,7 @@ class FixTests(unittest.TestCase):
         page.mouse.move.assert_called_once_with(500,200);page.mouse.wheel.assert_called_once_with(0,120)
         browser_screen.stop('screen',token)
     def test_postgres_executescript_keeps_drop_index_in_order(self):
-        from pg_backend import Connection
+        from app.persistence.pg_backend import Connection
         raw=Mock()
         Connection(raw).executescript('''
             CREATE TABLE first_table(id INTEGER PRIMARY KEY, value REAL);

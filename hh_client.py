@@ -6,7 +6,7 @@ import requests
 from dotenv import set_key, dotenv_values
 from token_lock import token_file_lock
 from app.core.errors import HHUnavailableError
-from app_state import APP_STATE, STATE_LOCK
+from app.persistence.app_state import APP_STATE, STATE_LOCK
 from app.core.settings import *
 
 logger = logging.getLogger(__name__)

@@ -1,6 +1,6 @@
 """Durable external-operation journal. No automatic retry of ambiguous effects."""
 import json,time,uuid
-from app_state import database,get_task,update_task
+from app.persistence.app_state import database,get_task,update_task
 
 def init():
     import os
@@ -46,7 +46,7 @@ def begin(task_id,kind,key,data=None, connection=None):
 
 def finish(oid,state,data):
     import os
-    from transaction_scope import worker_job
+    from app.persistence.transaction_scope import worker_job
     job=worker_job.get()
     with database() as con:
         if job is not None and os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
@@ -144,7 +144,7 @@ def mark_inflight_unknown(task_id):
 
 def reserve_and_begin_ai(task_id, resume_id, vacancy_id, vacancy_name, resume_url, email):
     """History reservation and operation journal commit in one transaction."""
-    from tracking_service import reserve_for_ai
+    from app.persistence.tracking_service import reserve_for_ai
     with database() as con:
         con.execute('BEGIN IMMEDIATE')
         if not reserve_for_ai(resume_id, vacancy_id, vacancy_name, resume_url,

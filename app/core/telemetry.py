@@ -4,7 +4,7 @@ log=logging.getLogger(__name__)
 
 def init():
     if os.getenv('APP_SCHEMA_MANAGED')=='true':return
-    from durable_queue import connect
+    from app.persistence.durable_queue import connect
     with connect() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS service_counters(
           name TEXT PRIMARY KEY,value DOUBLE PRECISION NOT NULL DEFAULT 0)""")
@@ -14,7 +14,7 @@ def init():
 
 def increment(name,value=1):
     try:
-        from durable_queue import connect
+        from app.persistence.durable_queue import connect
         with connect() as c:
             c.execute("""INSERT INTO service_counters(name,value) VALUES(%s,%s)
               ON CONFLICT(name) DO UPDATE SET value=service_counters.value+EXCLUDED.value""",(name,value))
@@ -26,14 +26,14 @@ def observe_captcha(seconds):
         if seconds<=bound:increment('captcha_wait_bucket_'+str(bound))
 
 def presence(worker_id,lane,state='idle'):
-    from durable_queue import connect
+    from app.persistence.durable_queue import connect
     with connect() as c:
         c.execute("""INSERT INTO worker_presence VALUES(%s,%s,%s,%s)
           ON CONFLICT(worker_id) DO UPDATE SET updated=EXCLUDED.updated,state=EXCLUDED.state""",
           (worker_id,lane,time.time(),state))
 
 def render():
-    from durable_queue import connect
+    from app.persistence.durable_queue import connect
     now=time.time();lines=[]
     with connect() as c:
         for r in c.execute('SELECT lane,state,COUNT(*) AS n FROM task_jobs GROUP BY lane,state'):

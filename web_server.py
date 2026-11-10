@@ -15,17 +15,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from app_state import APP_STATE, EXECUTOR, STATE_LOCK, create_task, get_task, update_task, set_review, save_query, claim_review, cancel_review, recover_tasks, expire_reviews, list_tasks
+from app.persistence.app_state import APP_STATE, EXECUTOR, STATE_LOCK, create_task, get_task, update_task, set_review, save_query, claim_review, cancel_review, recover_tasks, expire_reviews, list_tasks
 from app.core.errors import UserFacingError
 from hh_client import fetch_active_vacancies, fetch_vacancy_details
 from recruitment_data import clean_html
 from recruitment_service import find_and_evaluate, prepare_query, finish_xray_query
 from app.core.security import sanitize_vacancy_html, valid_email
-import operation_store as operations
+from app.persistence import operation_store as operations
 from workflow import run_hh, run_xray, NeedsManual
 from browser_pause import request_action
 from xray_plan import validate_sources, validate_plan, DEFAULT_SOURCES
-from tracking_service import import_legacy_history
+from app.persistence.tracking_service import import_legacy_history
 from app.core.settings import (
     APP_HOST, APP_PORT, BASE_DIR, DEFAULT_EVALUATION_COUNT, EMPLOYER_ID,
     TASK_RETENTION_HOURS,
@@ -134,7 +134,7 @@ def run_task(task_id, prepare=False, cooperative=False, hh_steps=None):
 
 def submit_task(task_id,prepare=False):
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
-        from durable_queue import enqueue
+        from app.persistence.durable_queue import enqueue
         return enqueue(task_id,prepare)
     task=get_task(task_id)
     if task and task.get('mode')=='hh':
@@ -142,7 +142,7 @@ def submit_task(task_id,prepare=False):
         return HH_SCHEDULER.submit(run_task,task_id,prepare)
     return EXECUTOR.submit(run_task,task_id,prepare)
 
-from transaction_scope import atomic_submission
+from app.persistence.transaction_scope import atomic_submission
 @atomic_submission
 def start_task(vacancy_id, requested_count, responsible_email, mode="hh", xray_sources=None, owner_session=None):
     task_id, created = create_task(uuid.uuid4().hex, vacancy_id, requested_count, responsible_email, mode, owner_session=owner_session)
@@ -343,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             tid=match.group(1)
             if operations.unknowns(tid):return self.send_json({'error':'Сначала разрешите операции с неизвестным исходом.'},409)
-            from app_state import database, _read, _save
+            from app.persistence.app_state import database, _read, _save
             with database() as con:
                 con.execute('BEGIN IMMEDIATE')
                 task=_read(con.execute('SELECT * FROM tasks WHERE id=?',(tid,)).fetchone())
@@ -417,7 +417,7 @@ _instance_handle = None
 def acquire_instance_lock():
     # Recovery must never classify another live worker as crashed.
     global _instance_handle
-    from app_state import DB_PATH
+    from app.persistence.app_state import DB_PATH
     handle=open(str(DB_PATH)+'.lock','a+b')
     try:
         import os
@@ -447,7 +447,7 @@ def start_server():
     from retention import start_retention
     retention_stop,retention_thread=start_retention()
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
-        from durable_queue import init,reap,reconcile
+        from app.persistence.durable_queue import init,reap,reconcile
         from shared_screen import init as init_screens
         init();init_screens();reap();reconcile()
         recovered=[]  # Never globally reset jobs owned by live workers.

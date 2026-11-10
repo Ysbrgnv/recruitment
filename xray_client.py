@@ -189,7 +189,7 @@ def launch_browser(playwright):
 
 def search_profiles(query,task_id=None):
     if not isinstance(query,str) or not query.strip():raise UserFacingError('Пустой X-Ray запрос.')
-    from app_state import get_task,update_task
+    from app.persistence.app_state import get_task,update_task
     from xray_plan import validate_plan,DEFAULT_SOURCES,source_for_url,parse_query
     from google_page import result_links,page_state,next_page_url
     from urllib.parse import urlencode

@@ -8,6 +8,6 @@ if __name__=='__main__':
     os.environ["PROCESS_ROLE"]="worker-"+sys.argv[sys.argv.index("--lane")+1]
     from app.core.logging_setup import configure_logging
     configure_logging()
-    from durable_queue import main
+    from app.persistence.durable_queue import main
     main()
 

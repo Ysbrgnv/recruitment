@@ -2,7 +2,7 @@ import logging
 import re
 import time
 
-from app_state import set_review, get_task, update_task
+from app.persistence.app_state import set_review, get_task, update_task
 from app.core.errors import AIUnavailableError, HHUnavailableError
 from hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
 from nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
@@ -12,7 +12,7 @@ from app.core.settings import (
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
     validate_nano_settings,
 )
-from tracking_service import reset_history_cache, was_sent_to_ai
+from app.persistence.tracking_service import reset_history_cache, was_sent_to_ai
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
 
 def find_and_evaluate(vacancy_id, requested_count, responsible_email, task_id, progress=lambda *_: None, approved_query=None):
     """Compatibility entry point. All HH processing uses workflow.run_hh."""
-    from app_state import get_task,update_task
+    from app.persistence.app_state import get_task,update_task
     from workflow import run_hh
     task=get_task(task_id)
     if not task or task['mode']!='hh':raise ValueError('Требуется сохранённая HH-задача')
@@ -254,7 +254,7 @@ def prepare_query(vacancy_id, task_id, mode):
     vacancy = fetch_vacancy_details(vacancy_id)
     if mode == 'xray':
         from app.core.errors import UserFacingError
-        from app_state import get_task
+        from app.persistence.app_state import get_task
         from xray_plan import build_plan, DEFAULT_SOURCES, city_name
         task=get_task(task_id)
         city=city_name(vacancy)

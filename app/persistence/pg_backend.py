@@ -42,8 +42,8 @@ class Connection:
 
 @contextmanager
 def database(url):
-    from db_pool import connection
-    from transaction_scope import pg_connection,bind
+    from app.persistence.db_pool import connection
+    from app.persistence.transaction_scope import pg_connection,bind
     raw=pg_connection.get()
     if raw is not None:
         yield Connection(raw)

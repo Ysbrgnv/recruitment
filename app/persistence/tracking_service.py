@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime
-from app_state import database
+from app.persistence.app_state import database
 from app.core.errors import TrackerUnavailableError
 from app.core.settings import RESERVATION_STALE_MINUTES
 

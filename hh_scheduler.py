@@ -25,8 +25,8 @@ class HHScheduler:
     def _failure(self,task_id):
         logger.exception('HH scheduler failed for task %s',task_id)
         try:
-            from app_state import get_task,update_task
-            import operation_store as ops
+            from app.persistence.app_state import get_task,update_task
+            from app.persistence import operation_store as ops
             if not get_task(task_id):return
             ops.mark_inflight_unknown(task_id)
             if ops.unknowns(task_id):

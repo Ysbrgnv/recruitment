@@ -12,8 +12,8 @@ def enabled():return os.getenv('TASK_QUEUE_BACKEND','local')=='postgres'
 def connect():
     url=os.environ.get('DATABASE_URL')
     if not url:raise RuntimeError('DATABASE_URL is required for the PostgreSQL queue')
-    from db_pool import connection
-    from transaction_scope import pg_connection,bind
+    from app.persistence.db_pool import connection
+    from app.persistence.transaction_scope import pg_connection,bind
     existing=pg_connection.get()
     if existing is not None:
         yield existing
@@ -39,7 +39,7 @@ def init():
     init_metrics()
 
 def enqueue(task_id,prepare=False):
-    from app_state import get_task
+    from app.persistence.app_state import get_task
     task=get_task(task_id)
     if not task:raise KeyError(task_id)
     phase='prepare' if prepare else 'run'
@@ -72,7 +72,7 @@ def claim(lane,lease=45):
         if not con.execute('SELECT pg_try_advisory_xact_lock(%s) AS ok',(row['id'],)).fetchone()['ok']:return None
         row=con.execute("""UPDATE task_jobs SET state='running',owner=%s,lease_until=%s,
           attempt=attempt+1,updated=%s WHERE id=%s RETURNING *""",(owner,now+lease,now,row['id'])).fetchone()
-        from app_state import update_task
+        from app.persistence.app_state import update_task
         update_task(row['task_id'],status='running',stage='query' if row['phase']=='prepare' else 'setup')
         return row
 
@@ -96,8 +96,8 @@ def finish_failure(job,retryable,reason):
         _finish_failure(job,retryable,reason)
 
 def _finish_failure(job,retryable,reason):
-    from app_state import get_task,update_task
-    import operation_store as ops
+    from app.persistence.app_state import get_task,update_task
+    from app.persistence import operation_store as ops
     from app.core.retry_policy import maximum,delay
     from app.core.telemetry import increment
     ops.mark_inflight_unknown(job['task_id'])
@@ -119,8 +119,8 @@ def _finish_failure(job,retryable,reason):
 
 def reap():
     """Never restart a live worker, even if its heartbeat was delayed."""
-    from app_state import get_task,update_task
-    import operation_store as ops
+    from app.persistence.app_state import get_task,update_task
+    from app.persistence import operation_store as ops
     with connect() as con:
         con.execute('SELECT pg_advisory_xact_lock(714202601)')
         rows=con.execute("SELECT * FROM task_jobs WHERE state='running' AND lease_until<%s FOR UPDATE SKIP LOCKED",(time.time(),)).fetchall()
@@ -160,7 +160,7 @@ def reap():
 
 def reconcile():
     # Repair the small create/submit crash window without resetting active jobs.
-    from app_state import database,_read
+    from app.persistence.app_state import database,_read
     with database() as con:rows=con.execute("SELECT * FROM tasks WHERE status='queued'").fetchall()
     for row in rows:
         task=_read(row);phase='run' if task.get('query') else 'prepare'
@@ -172,7 +172,7 @@ def run_once(lane,runner=None,lease=45):
     job=claim(lane,lease)
     if not job:return False
     # Claim/reaper race: recheck ownership while holding the session lock.
-    from db_pool import connection_kwargs
+    from app.persistence.db_pool import connection_kwargs
     from psycopg.conninfo import conninfo_to_dict
     kwargs=connection_kwargs();kwargs['row_factory']=None
     kwargs['options']=conninfo_to_dict(os.environ['DATABASE_URL']).get('options','')+' '+kwargs['options']
@@ -202,10 +202,10 @@ def run_once(lane,runner=None,lease=45):
             from web_server import run_task
             runner=run_task
         log.info('Job started',extra={'task_id':job['task_id'],'job_id':job['id'],'attempt':job['attempt'],'worker_id':job['owner']})
-        from transaction_scope import worker_job,bind
+        from app.persistence.transaction_scope import worker_job,bind
         with bind(worker_job,job):
             runner(job['task_id'],job['phase']=='prepare')
-        from app_state import get_task
+        from app.persistence.app_state import get_task
         task=get_task(job['task_id'])
         if task and task['status']=='failed':finish_failure(job,bool(task.get('error_retryable')),'task_failed')
         else:
@@ -255,7 +255,7 @@ def main():
     except (TypeError,ValueError):count=maximum
     log.info('Starting parallel consumers',extra={'stage':args.lane,'attempt':count})
     threads=[threading.Thread(target=worker_loop,args=(args.lane,stop,i+1),name=f'{args.lane}-{i+1}',daemon=False) for i in range(count)]
-    from db_pool import close_pools
+    from app.persistence.db_pool import close_pools
     try:
         for thread in threads:thread.start()
         while not stop.wait(1):
@@ -271,7 +271,7 @@ def sync_terminal(con,task):
     """Called before task save: task and owned queue transition commit together.
     con is the legacy adapter over the SAME PostgreSQL transaction.
     """
-    from transaction_scope import worker_job
+    from app.persistence.transaction_scope import worker_job
     job=worker_job.get()
     if not job or task['task_id']!=job['task_id']:return
     status=task['status']
