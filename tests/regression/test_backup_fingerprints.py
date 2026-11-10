@@ -23,7 +23,7 @@ class Connection:
     def cursor(self,**kw):return Cursor(self.rows)
 class FingerprintTests(unittest.TestCase):
     def setUp(self):
-        path=Path(__file__).resolve().parents[1]/'scripts'/'backup'/'verify.py'
+        path=Path(__file__).resolve().parents[2]/'scripts'/'backup'/'verify.py'
         node=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='content_fingerprints')
         env={'hashlib':hashlib,'uuid':uuid,'sql':SQLModule}
         exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),'exec'),env);self.f=env['content_fingerprints']

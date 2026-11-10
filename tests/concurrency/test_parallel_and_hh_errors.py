@@ -1,5 +1,5 @@
 from pathlib import Path
-ROOT=Path(__file__).parents[1]
+ROOT=Path(__file__).parents[2]
 def test_parallel_limits():
     worker=(ROOT/'app/persistence/durable_queue.py').read_text()
     compose=(ROOT/'compose.yaml').read_text()

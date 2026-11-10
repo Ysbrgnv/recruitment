@@ -2,7 +2,7 @@
 import ast,sys,types,tempfile,unittest,threading,logging,re,os
 from pathlib import Path
 from unittest.mock import patch,Mock
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 import app.core as core_package
 from app.core import settings as real_settings

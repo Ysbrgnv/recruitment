@@ -2,7 +2,7 @@
 import os,sys,tempfile,unittest,json,threading,time,importlib.util
 from pathlib import Path
 from unittest.mock import patch,Mock
-ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 TEMP=tempfile.TemporaryDirectory()
 os.environ.update(APP_ENV_FILE=str(Path(TEMP.name)/'source.env'),LOG_DIR=str(Path(TEMP.name)/'logs'),RECRUITMENT_DB_PATH=str(Path(TEMP.name)/'initial.db'),TASK_QUEUE_BACKEND='local')
 os.environ.pop('DATABASE_URL',None);os.environ.pop('APP_SCHEMA_MANAGED',None)
