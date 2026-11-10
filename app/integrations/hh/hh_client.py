@@ -4,7 +4,7 @@ from functools import wraps
 from urllib.parse import urlencode
 import requests
 from dotenv import set_key, dotenv_values
-from token_lock import token_file_lock
+from app.integrations.hh.token_lock import token_file_lock
 from app.core.errors import HHUnavailableError
 from app.persistence.app_state import APP_STATE, STATE_LOCK
 from app.core.settings import *

@@ -121,5 +121,5 @@ def next_frame(task_id, token, after, timeout=1):
 # In server mode all web/worker processes use the same task-scoped screen store.
 import os as _os
 if _os.getenv('TASK_QUEUE_BACKEND','local') == 'postgres':
-    from shared_screen import start,stop,frame,enqueue,pump,open_stream,close_stream,next_frame
+    from app.browser.shared_screen import start,stop,frame,enqueue,pump,open_stream,close_stream,next_frame
 

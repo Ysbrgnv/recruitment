@@ -7,7 +7,7 @@ from app.persistence.app_state import get_task,update_task,database
 from app.persistence.tracking_service import reserve_for_ai,update_tracking
 from app.core.errors import AIUnavailableError,MailUnavailableError,UserFacingError
 from mail_service import send_candidate_email,send_xray_email
-from xray_client import search_profiles,canonical_profile
+from app.integrations.xray.xray_client import search_profiles,canonical_profile
 
 class NeedsManual(UserFacingError):pass
 
@@ -180,7 +180,7 @@ def run_xray(task_id,progress):
     task=get_task(task_id)
     if ops.unknowns(task_id):pause(task_id)
     cp=task.get('checkpoint') or {};vacancy=cp.get('vacancy') or service.fetch_vacancy_details(task['vacancy_id'])
-    from xray_plan import source_for_url,DEFAULT_SOURCES
+    from app.integrations.xray.xray_plan import source_for_url,DEFAULT_SOURCES
     selected=task.get('xray_sources',DEFAULT_SOURCES)
     counters=cp.get('filter_counts',{'history_excluded':0,'pool_duplicates':0,'pool_invalid':0})
     profiles=cp.get('profiles',[]);seen={x['url'] for x in profiles};n=task['requested_count']

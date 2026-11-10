@@ -1,7 +1,7 @@
 import html
 
 from app.core.errors import MailUnavailableError
-from gmail_transport import send_html
+from app.integrations.gmail.gmail_transport import send_html
 
 LABELS = {
     "mandatory_requirements": "Обязательные требования",
@@ -160,7 +160,7 @@ def send_candidate_email(responsible_email: str, vacancy: dict, item: dict, sear
 
 
 def build_xray_email(vacancy, profiles, requested_count, query, delivery_id):
-    from xray_client import canonical_profile
+    from app.integrations.xray.xray_client import canonical_profile
     cards=[]
     for number,profile in enumerate(profiles,1):
         url=canonical_profile(profile.get('url'))

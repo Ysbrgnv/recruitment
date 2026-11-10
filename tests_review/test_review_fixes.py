@@ -18,7 +18,7 @@ core_package.settings=settings
 from app.persistence import app_state
 from app.persistence import operation_store as ops
 from app.persistence import tracking_service
-import browser_screen
+from app.browser import browser_screen
 app_state.init_db();ops.init()
 sys.modules['app.core.settings']=real_settings
 core_package.settings=real_settings
@@ -111,7 +111,7 @@ class FixTests(unittest.TestCase):
         ])
 
     def test_postgres_wheel_contract(self):
-        env=isolated_functions('shared_screen.py',{'enqueue'})
+        env=isolated_functions('app/browser/shared_screen.py',{'enqueue'})
         from contextlib import contextmanager
         row={'token':'token','commands':'[]'}
         con=Mock();con.execute.return_value.fetchone.return_value=row

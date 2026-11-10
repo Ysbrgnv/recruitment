@@ -4,8 +4,8 @@ import time
 
 from app.persistence.app_state import set_review, get_task, update_task
 from app.core.errors import AIUnavailableError, HHUnavailableError
-from hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
-from nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
+from app.integrations.hh.hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
+from app.integrations.ai.nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
 from recruitment_data import resume_filter_result, vacancy_requirements
 from app.core.settings import (
     MAX_CANDIDATE_POOL, POOL_EXTRA, POOL_MULTIPLIER,
@@ -255,7 +255,7 @@ def prepare_query(vacancy_id, task_id, mode):
     if mode == 'xray':
         from app.core.errors import UserFacingError
         from app.persistence.app_state import get_task
-        from xray_plan import build_plan, DEFAULT_SOURCES, city_name
+        from app.integrations.xray.xray_plan import build_plan, DEFAULT_SOURCES, city_name
         task=get_task(task_id)
         city=city_name(vacancy)
         try:query=build_plan(generate_xray_query(vacancy),task.get('xray_sources',DEFAULT_SOURCES),city)

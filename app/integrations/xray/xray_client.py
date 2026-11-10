@@ -7,7 +7,7 @@ from app.core.errors import UserFacingError
 from playwright.sync_api import sync_playwright,Error as BrowserError,TimeoutError as BrowserTimeout
 import threading
 import os
-from browser_pause import wait_for_human
+from app.browser.browser_pause import wait_for_human
 SEARCH_LOCK=threading.BoundedSemaphore(8)
 logger=logging.getLogger(__name__)
 
@@ -34,12 +34,12 @@ def canonical_profile(value):
 
 
 def extract_profile(value):
-    from google_page import unwrap_google_link
+    from app.integrations.xray.google_page import unwrap_google_link
     return canonical_profile(unwrap_google_link(value))
 
 
 def rejection_reason(href):
-    from google_page import unwrap_google_link,is_google_host
+    from app.integrations.xray.google_page import unwrap_google_link,is_google_host
     target=unwrap_google_link(href)
     if not target:return 'invalid_or_unsupported_redirect'
     try:
@@ -73,7 +73,7 @@ class RejectedHrefLog:
 
 def browser_redirect_url(value):
     """Only explicitly supported Google wrappers are opened in a browser."""
-    from google_page import unwrap_google_link,is_google_host
+    from app.integrations.xray.google_page import unwrap_google_link,is_google_host
     value=unwrap_google_link(value)
     if value.startswith('/'):value=urljoin('https://www.google.com',value)
     try:
@@ -90,7 +90,7 @@ def resolve_browser_profile(context,href,task_id=None):
 
     No destination profile document is downloaded or inspected. No CAPTCHA is solved.
     """
-    from google_page import is_google_host
+    from app.integrations.xray.google_page import is_google_host
     start=browser_redirect_url(href)
     if not start:return None,'not_supported_browser_redirect'
     tab=context.new_page()
@@ -113,7 +113,7 @@ def resolve_browser_profile(context,href,task_id=None):
         if not request.is_navigation_request() or request.frame!=tab.main_frame:
             route.fallback();return
         value=request.url
-        from google_page import unwrap_google_link
+        from app.integrations.xray.google_page import unwrap_google_link
         visited=set()
         for hop in range(8):
             profile=canonical_profile(unwrap_google_link(value))
@@ -190,8 +190,8 @@ def launch_browser(playwright):
 def search_profiles(query,task_id=None):
     if not isinstance(query,str) or not query.strip():raise UserFacingError('Пустой X-Ray запрос.')
     from app.persistence.app_state import get_task,update_task
-    from xray_plan import validate_plan,DEFAULT_SOURCES,source_for_url,parse_query
-    from google_page import result_links,page_state,next_page_url
+    from app.integrations.xray.xray_plan import validate_plan,DEFAULT_SOURCES,source_for_url,parse_query
+    from app.integrations.xray.google_page import result_links,page_state,next_page_url
     from urllib.parse import urlencode
     task=get_task(task_id) if task_id else None
     sources=task.get('xray_sources',DEFAULT_SOURCES) if task else DEFAULT_SOURCES

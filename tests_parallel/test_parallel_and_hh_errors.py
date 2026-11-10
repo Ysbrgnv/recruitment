@@ -18,7 +18,7 @@ def test_hh_startup_single_flight_and_expected_error_without_traceback():
     assert 'except UserFacingError as exc:' in source
     assert 'logger.warning("Вакансии HH недоступны: %s", exc)' in source
 def test_refresh_guard_survives_restart():
-    source=(ROOT/'hh_client.py').read_text()
+    source=(ROOT/'app/integrations/hh/hh_client.py').read_text()
     assert ".hh-refresh-state.json" in source
     assert "state.get('blocked')" in source
 

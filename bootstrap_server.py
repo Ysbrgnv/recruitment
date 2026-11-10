@@ -12,7 +12,7 @@ def main():
     env=dict(os.environ,DATABASE_URL=admin,APP_SCHEMA_MANAGED='false',TASK_QUEUE_BACKEND='postgres')
     # Use a fresh process so imported modules cannot retain runtime credentials.
     subprocess.run([sys.executable,'-c',
-        'from app.persistence import app_state,operation_store,durable_queue; import shared_screen; from app.core import telemetry; app_state.init_db(); operation_store.init(); durable_queue.init(); shared_screen.init(); telemetry.init()'],
+        'from app.persistence import app_state,operation_store,durable_queue; from app.browser import shared_screen; from app.core import telemetry; app_state.init_db(); operation_store.init(); durable_queue.init(); shared_screen.init(); telemetry.init()'],
         cwd=root,env=env,check=True,timeout=60)
     with psycopg.connect(admin) as c:
         db=c.execute('SELECT current_database()').fetchone()[0]

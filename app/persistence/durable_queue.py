@@ -129,7 +129,7 @@ def reap():
             task=get_task(job['task_id'])
             if not task:
                 con.execute("UPDATE task_jobs SET state='done',owner=NULL WHERE id=%s",(job['id'],));continue
-            from shared_screen import stop_all
+            from app.browser.shared_screen import stop_all
             stop_all(job['task_id'])
             ops.mark_inflight_unknown(job['task_id'])
             if ops.unknowns(job['task_id']):

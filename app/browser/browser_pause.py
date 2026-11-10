@@ -28,7 +28,7 @@ def consume_action(task_id):
         return action
 
 def wait_for_human(page,task_id,check,timeout=1800,ready=None):
-    import browser_screen
+    from app.browser import browser_screen
     import os
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
         timeout=max(60,min(3600,int(os.getenv('CAPTCHA_WAIT_SECONDS','1800'))))
@@ -44,13 +44,13 @@ def wait_for_human(page,task_id,check,timeout=1800,ready=None):
             observe_captcha(time.monotonic()-started)
 
 def _wait_for_human(page,task_id,check,timeout=1800,ready=None,screen_token=None):
-    from google_page import page_state
+    from app.integrations.xray.google_page import page_state
     if not task_id:raise UserFacingError('Для ручной проверки требуется идентификатор задачи.')
     update_task(task_id,status='waiting_browser',stage='browser_verification',browser_action=None,message='Пройдите проверку самостоятельно в открытом окне браузера, затем нажмите «Продолжить поиск».')
     page.bring_to_front();deadline=time.monotonic()+timeout
     while time.monotonic()<deadline:
         if page.is_closed():raise UserFacingError('Окно поиска закрыто. Ссылки сохранены; возобновите задачу.')
-        import browser_screen
+        from app.browser import browser_screen
         browser_screen.pump(page,task_id,screen_token)
         action=consume_action(task_id)
         if action=='cancel':raise UserFacingError('Поиск остановлен пользователем. Ссылки сохранены.')

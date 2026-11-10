@@ -25,7 +25,7 @@ def snapshot():
 def main():
     p=argparse.ArgumentParser();p.add_argument('action',choices=['snapshot','compare','hh']);a=p.parse_args()
     if a.action=='hh':
-        from hh_client import hh_get
+        from app.integrations.hh.hh_client import hh_get
         hh_get('/me');print('HH_CURRENT_ACCESS_OK (expiry refresh not forced)');return
     value=snapshot()
     if a.action=='snapshot':print(json.dumps(value));return

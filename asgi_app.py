@@ -18,7 +18,7 @@ async def lifespan(app):
     configure_logging()
     anyio.to_thread.current_default_thread_limiter().total_tokens=16
     from app.persistence.durable_queue import init,reap,reconcile
-    from shared_screen import init as screen_init
+    from app.browser.shared_screen import init as screen_init
     from app.core.telemetry import init as metric_init
     from retention import start_retention
     await anyio.to_thread.run_sync(lambda:(init(),screen_init(),metric_init(),reap(),reconcile()))
@@ -80,7 +80,7 @@ async def screen_stream(task_id:str,request:Request):
     if not re.fullmatch('[a-f0-9]{32}',task_id):return JSONResponse({'error':'Not found'},404)
     from app.core.api_guard import identity,owns
     from app.persistence.app_state import get_task
-    import browser_screen
+    from app.browser import browser_screen
     task=await anyio.to_thread.run_sync(lambda:get_task(task_id))
     if not owns(task,identity(request.headers)):return JSONResponse({'error':'Задача недоступна для этой сессии.'},403)
     token=request.query_params.get('token','')

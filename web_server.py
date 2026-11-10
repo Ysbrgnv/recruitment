@@ -17,14 +17,14 @@ from urllib.parse import urlparse, parse_qs
 
 from app.persistence.app_state import APP_STATE, EXECUTOR, STATE_LOCK, create_task, get_task, update_task, set_review, save_query, claim_review, cancel_review, recover_tasks, expire_reviews, list_tasks
 from app.core.errors import UserFacingError
-from hh_client import fetch_active_vacancies, fetch_vacancy_details
+from app.integrations.hh.hh_client import fetch_active_vacancies, fetch_vacancy_details
 from recruitment_data import clean_html
 from recruitment_service import find_and_evaluate, prepare_query, finish_xray_query
 from app.core.security import sanitize_vacancy_html, valid_email
 from app.persistence import operation_store as operations
 from workflow import run_hh, run_xray, NeedsManual
-from browser_pause import request_action
-from xray_plan import validate_sources, validate_plan, DEFAULT_SOURCES
+from app.browser.browser_pause import request_action
+from app.integrations.xray.xray_plan import validate_sources, validate_plan, DEFAULT_SOURCES
 from app.persistence.tracking_service import import_legacy_history
 from app.core.settings import (
     APP_HOST, APP_PORT, BASE_DIR, DEFAULT_EVALUATION_COUNT, EMPLOYER_ID,
@@ -138,7 +138,7 @@ def submit_task(task_id,prepare=False):
         return enqueue(task_id,prepare)
     task=get_task(task_id)
     if task and task.get('mode')=='hh':
-        from hh_scheduler import HH_SCHEDULER
+        from app.integrations.hh.hh_scheduler import HH_SCHEDULER
         return HH_SCHEDULER.submit(run_task,task_id,prepare)
     return EXECUTOR.submit(run_task,task_id,prepare)
 
@@ -217,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _screen_stream(self, task_id):
-        import browser_screen
+        from app.browser import browser_screen
         token = parse_qs(urlparse(self.path).query).get('token', [''])[0]
         if not browser_screen.open_stream(task_id, token):
             return self.send_json({'error':'Проверка завершена или лимит подключений исчерпан.'}, 409)
@@ -256,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
         if stream_match:return self._screen_stream(stream_match.group(1))
         screen_match=re.fullmatch(r'/api/tasks/([0-9a-f]{32})/screen(?:/(frame))?',path)
         if screen_match:
-            import browser_screen,base64
+            from app.browser import browser_screen; import base64
             task_id=screen_match.group(1)
             if screen_match.group(2):
                 snapshot=browser_screen.frame(task_id)
@@ -315,7 +315,7 @@ class Handler(BaseHTTPRequestHandler):
     def _post_validated(self,path):
         screen_match=re.fullmatch(r'/api/tasks/([0-9a-f]{32})/screen/input',path)
         if screen_match:
-            import browser_screen
+            from app.browser import browser_screen
             try:
                 ok=browser_screen.enqueue(screen_match.group(1),self._request_json)
                 return self.send_json({'ok':True} if ok else {'error':'Эта проверка уже завершена.'},200 if ok else 409)
@@ -327,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/tasks/([0-9a-f]{32})/browser-(open|continue|cancel)", path)
         if match:
             if 'screen_token' in self._request_json:
-                import browser_screen
+                from app.browser import browser_screen
                 current=browser_screen.frame(match.group(1))
                 if not current or current['token']!=self._request_json['screen_token']:
                     return self.send_json({'error':'Эта проверка уже завершена.'},409)
@@ -448,7 +448,7 @@ def start_server():
     retention_stop,retention_thread=start_retention()
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
         from app.persistence.durable_queue import init,reap,reconcile
-        from shared_screen import init as init_screens
+        from app.browser.shared_screen import init as init_screens
         init();init_screens();reap();reconcile()
         recovered=[]  # Never globally reset jobs owned by live workers.
     else:
