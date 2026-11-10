@@ -5,7 +5,7 @@ import re
 import requests
 
 from app.core.errors import AIUnavailableError
-from recruitment_data import prepare_full_resume, prepare_vacancy
+from app.services.recruitment_data import prepare_full_resume, prepare_vacancy
 from app.core.settings import API_NANO_URL, MODEL_NANO, NANO_GPT_API_KEY, NANO_TIMEOUT
 
 logger = logging.getLogger(__name__)

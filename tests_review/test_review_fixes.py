@@ -55,27 +55,27 @@ class FixTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):self.reserve()
         self.assertFalse(tracking_service.was_sent_to_ai('r','v'))
     def test_count_rejected(self):
-        env=isolated_functions('web_server.py',{'_post_validated'})
+        env=isolated_functions('app/web/web_server.py',{'_post_validated'})
         for value in [True,False,1.9,1.0,'2',None,0,11,[],{}]:
             with self.subTest(value=value):
                 handler=Mock();handler.read_json.return_value={'requested_count':value}
                 env['_post_validated'](handler,'/api/vacancy/123/find-resumes')
                 self.assertEqual(handler.send_json.call_args.args[1],400)
     def test_valid_count_reaches_email_validation(self):
-        env=isolated_functions('web_server.py',{'_post_validated'});env['valid_email']=Mock(return_value=False)
+        env=isolated_functions('app/web/web_server.py',{'_post_validated'});env['valid_email']=Mock(return_value=False)
         for value in [1,10]:
             handler=Mock();handler.read_json.return_value={'requested_count':value}
             env['_post_validated'](handler,'/api/vacancy/123/find-resumes')
             self.assertIn('почту',handler.send_json.call_args.args[0]['error'])
     def test_refresh_failure_preserves_cache(self):
-        env=isolated_functions('web_server.py',{'load_vacancies'})
+        env=isolated_functions('app/web/web_server.py',{'load_vacancies'})
         env['fetch_active_vacancies']=Mock(side_effect=RuntimeError('HH unavailable'))
         self.assertFalse(env['load_vacancies']());self.assertEqual(env['APP_STATE']['vacancies'],['old'])
     def test_refresh_success(self):
-        env=isolated_functions('web_server.py',{'load_vacancies'});env['fetch_active_vacancies']=Mock(return_value=['new'])
+        env=isolated_functions('app/web/web_server.py',{'load_vacancies'});env['fetch_active_vacancies']=Mock(return_value=['new'])
         self.assertTrue(env['load_vacancies']());self.assertEqual(env['APP_STATE']['vacancies'],['new'])
     def test_refresh_http_failure(self):
-        env=isolated_functions('web_server.py',{'_post_validated'});env['load_vacancies']=lambda:False
+        env=isolated_functions('app/web/web_server.py',{'_post_validated'});env['load_vacancies']=lambda:False
         handler=Mock();env['_post_validated'](handler,'/api/refresh')
         self.assertEqual(handler.send_json.call_args.args[1],502)
     def test_wheel_validation(self):

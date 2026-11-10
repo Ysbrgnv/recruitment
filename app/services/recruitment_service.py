@@ -6,7 +6,7 @@ from app.persistence.app_state import set_review, get_task, update_task
 from app.core.errors import AIUnavailableError, HHUnavailableError
 from app.integrations.hh.hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
 from app.integrations.ai.nano_client import evaluate_one_resume, evaluation_to_text, generate_resume_language_query, generate_xray_query
-from recruitment_data import resume_filter_result, vacancy_requirements
+from app.services.recruitment_data import resume_filter_result, vacancy_requirements
 from app.core.settings import (
     MAX_CANDIDATE_POOL, POOL_EXTRA, POOL_MULTIPLIER,
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
@@ -238,7 +238,7 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
 def find_and_evaluate(vacancy_id, requested_count, responsible_email, task_id, progress=lambda *_: None, approved_query=None):
     """Compatibility entry point. All HH processing uses workflow.run_hh."""
     from app.persistence.app_state import get_task,update_task
-    from workflow import run_hh
+    from app.services.workflow import run_hh
     task=get_task(task_id)
     if not task or task['mode']!='hh':raise ValueError('Требуется сохранённая HH-задача')
     if str(task['vacancy_id'])!=str(vacancy_id) or task['requested_count']!=int(requested_count) or task['responsible_email']!=responsible_email.strip().casefold():

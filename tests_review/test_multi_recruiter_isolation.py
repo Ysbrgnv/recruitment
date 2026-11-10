@@ -23,8 +23,8 @@ os.environ.pop("APP_SCHEMA_MANAGED", None)
 
 from app.persistence import app_state as state
 from app.persistence import operation_store as operations
-import asgi_app
-import web_server
+from app.web import asgi_app
+from app.web import web_server
 
 
 

@@ -13,7 +13,7 @@ def test_parallel_claim_is_safe():
     assert 'FOR UPDATE OF j SKIP LOCKED LIMIT 1' in source
     assert 'task_jobs_one_running' in source
 def test_hh_startup_single_flight_and_expected_error_without_traceback():
-    source=(ROOT/'web_server.py').read_text()
+    source=(ROOT/'app/web/web_server.py').read_text()
     assert 'STATE_LOCK.acquire(blocking=False)' in source
     assert 'except UserFacingError as exc:' in source
     assert 'logger.warning("Вакансии HH недоступны: %s", exc)' in source

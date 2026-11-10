@@ -10,8 +10,8 @@ import requests
 from app.persistence import app_state as state
 from app.persistence import operation_store as ops
 from app.persistence import tracking_service as tracking
-from app.integrations.ai import nano_client as nano; from app.integrations.hh import hh_client as hh; import workflow,config_sync,mail_service
-import recruitment_data as recruitment_data, recruitment_service as recruitment_service
+from app.integrations.ai import nano_client as nano; from app.integrations.hh import hh_client as hh; from app.services import workflow; import config_sync; from app.services import mail_service
+from app.services import recruitment_data as recruitment_data; from app.services import recruitment_service as recruitment_service
 from app.core.errors import AIUnavailableError,HHUnavailableError
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
@@ -400,7 +400,7 @@ class WorkflowTests(unittest.TestCase):
         if pool is not None:checkpoint={**checkpoint,'pool':pool}
         state.update_task('t',requested_count=count,checkpoint=checkpoint)
     def test_query_validation_error_after_ai_response_fails_prepare_without_unknown_operation(self):
-        import web_server
+        from app.web import web_server
         error=AIUnavailableError('deterministic query validation rejection',request_sent=True)
         with patch.object(web_server,'prepare_query',side_effect=error),patch.object(web_server.operations,'mark_inflight_unknown') as mark_unknown:
             web_server.run_task('t',prepare=True)
@@ -806,7 +806,7 @@ class WorkflowTests(unittest.TestCase):
             workflow.run_hh('t',lambda *a:None)
             self.assertEqual(ai.call_count,2);self.assertEqual(mail.call_count,2)
         env=dict(os.environ,RECRUITMENT_DB_PATH=str(state.DB_PATH))
-        code="""import workflow
+        code="""from app.services import workflow
 from app.persistence import operation_store as ops
 from unittest.mock import patch
 with patch.object(workflow.service,'_build_candidate_result',side_effect=AssertionError('AI repeated')),patch.object(workflow,'send_candidate_email',side_effect=AssertionError('Mail repeated')):
@@ -967,7 +967,7 @@ class UnknownResolutionActorAuditTests(unittest.TestCase):
         return ops.get_op(self.TASK_ID,kind,key)['state']
 
     def post_resolve(self,cookie,oid,action='skip',reason='Reviewed external outcome'):
-        import asgi_app
+        from app.web import asgi_app
         body=json.dumps({'operation_id':oid,'action':action,'reason':reason}).encode()
         response=asgi_app.dispatch('POST',f'/api/tasks/{self.TASK_ID}/resolve',[
             (b'content-type',b'application/json'),

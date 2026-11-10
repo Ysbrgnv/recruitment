@@ -196,10 +196,10 @@ def run_once(lane,runner=None,lease=45):
     try:
         if not heartbeat(job,lease):return False
         thread=threading.Thread(target=beat,daemon=True);thread.start()
-        from progress_watchdog import watch
+        from app.workers.progress_watchdog import watch
         watch_thread=threading.Thread(target=watch,args=(job,stop),name='progress-watchdog',daemon=True);watch_thread.start()
         if runner is None:
-            from web_server import run_task
+            from app.web.web_server import run_task
             runner=run_task
         log.info('Job started',extra={'task_id':job['task_id'],'job_id':job['id'],'attempt':job['attempt'],'worker_id':job['owner']})
         from app.persistence.transaction_scope import worker_job,bind

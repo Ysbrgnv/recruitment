@@ -18,11 +18,11 @@ from urllib.parse import urlparse, parse_qs
 from app.persistence.app_state import APP_STATE, EXECUTOR, STATE_LOCK, create_task, get_task, update_task, set_review, save_query, claim_review, cancel_review, recover_tasks, expire_reviews, list_tasks
 from app.core.errors import UserFacingError
 from app.integrations.hh.hh_client import fetch_active_vacancies, fetch_vacancy_details
-from recruitment_data import clean_html
-from recruitment_service import find_and_evaluate, prepare_query, finish_xray_query
+from app.services.recruitment_data import clean_html
+from app.services.recruitment_service import find_and_evaluate, prepare_query, finish_xray_query
 from app.core.security import sanitize_vacancy_html, valid_email
 from app.persistence import operation_store as operations
-from workflow import run_hh, run_xray, NeedsManual
+from app.services.workflow import run_hh, run_xray, NeedsManual
 from app.browser.browser_pause import request_action
 from app.integrations.xray.xray_plan import validate_sources, validate_plan, DEFAULT_SOURCES
 from app.persistence.tracking_service import import_legacy_history
@@ -110,7 +110,7 @@ def run_task(task_id, prepare=False, cooperative=False, hh_steps=None):
             result = run_xray(task_id, progress)
         else:
             if cooperative:
-                from workflow import run_hh_steps
+                from app.services.workflow import run_hh_steps
                 hh_steps=hh_steps if hh_steps is not None else run_hh_steps(task_id,progress,staged=True)
                 try:
                     next_stage=next(hh_steps)
@@ -444,7 +444,7 @@ def start_server():
     except Exception:
         logger.exception("Не удалось импортировать старую историю")
         raise RuntimeError("Не удалось импортировать историю Excel. Закройте файл и проверьте его перед запуском.")
-    from retention import start_retention
+    from app.services.retention import start_retention
     retention_stop,retention_thread=start_retention()
     if os.getenv('TASK_QUEUE_BACKEND','local')=='postgres':
         from app.persistence.durable_queue import init,reap,reconcile

@@ -20,11 +20,11 @@ async def lifespan(app):
     from app.persistence.durable_queue import init,reap,reconcile
     from app.browser.shared_screen import init as screen_init
     from app.core.telemetry import init as metric_init
-    from retention import start_retention
+    from app.services.retention import start_retention
     await anyio.to_thread.run_sync(lambda:(init(),screen_init(),metric_init(),reap(),reconcile()))
     stop,thread=start_retention()
     # Never open an interactive HH login from a server startup hook.
-    from web_server import load_vacancies,APP_STATE
+    from app.web.web_server import load_vacancies,APP_STATE
     if os.getenv('HH_BEARER') or os.getenv('HH_REFRESH_TOKEN'):
         async def load():await anyio.to_thread.run_sync(load_vacancies)
         task=asyncio.create_task(load())
@@ -101,7 +101,7 @@ async def screen_stream(task_id:str,request:Request):
     return StreamingResponse(frames(),media_type='multipart/x-mixed-replace; boundary=screenframe',headers={'Cache-Control':'no-store','X-Accel-Buffering':'no'})
 
 def dispatch(method,path,headers,body):
-    from web_server import Handler
+    from app.web.web_server import Handler
     class Adapter(Handler):
         def __init__(self):
             self.path=path;self.command=method;self.headers=Message()
