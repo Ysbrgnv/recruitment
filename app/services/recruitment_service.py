@@ -351,20 +351,19 @@ def find_and_evaluate(vacancy_id, requested_count, responsible_email, task_id, p
 
 def prepare_query(vacancy_id, task_id, mode):
     missing = validate_nano_settings()
-    if missing:
-        raise AIUnavailableError("Не заполнены настройки AI: " + ", ".join(missing), request_sent=False)
+    if missing: raise AIUnavailableError("Не заполнены настройки AI: " + ", ".join(missing), request_sent=False)
     vacancy = fetch_vacancy_details(vacancy_id)
     if mode == 'xray':
         from app.core.errors import UserFacingError
         from app.persistence.app_state import get_task
         from app.integrations.xray.xray_plan import build_plan, DEFAULT_SOURCES, city_name
-        task=get_task(task_id)
-        city=city_name(vacancy)
-        try:query=build_plan(generate_xray_query(vacancy),task.get('xray_sources',DEFAULT_SOURCES),city)
-        except ValueError as exc:raise UserFacingError(str(exc)) from exc
+        task=get_task(task_id);city=city_name(vacancy)
+        try: query=build_plan(generate_xray_query(vacancy),task.get('xray_sources',DEFAULT_SOURCES),city)
+        except ValueError as exc: raise UserFacingError(str(exc)) from exc
+        set_review(task_id,query,vacancy_search_profile=None)
     else:
-        plan=generate_vacancy_search_plan(vacancy);query=plan["query"]
-    set_review(task_id, query, vacancy_search_profile=plan.get("profile") if mode != 'xray' else None)
+        result=generate_vacancy_search_plan(vacancy);query=result["query"]
+        set_review(task_id,query,vacancy_search_profile=result["profile"],vacancy_search_plan=result["plan"])
 
 
 def finish_xray_query(task_id, query):

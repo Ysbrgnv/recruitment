@@ -22,6 +22,16 @@ from app.integrations.xray import xray_plan
 from dotenv import dotenv_values
 spec=importlib.util.spec_from_file_location('prepare_local',ROOT/'docker/prepare_local.py');prepare=importlib.util.module_from_spec(spec);spec.loader.exec_module(prepare)
 
+
+def valid_v2_plan():
+    balanced='("Solution Architect" OR "Solutions Architect" OR "Архитектор решений") AND ("solution architecture" OR "solution design" OR "integration architecture")'
+    functions=[{"function_id":"solution_design","normalized_function":"проектирование архитектуры","search_terms":["solution architecture","solution design"],"evidence":["Архитектурное проектирование"]},{"function_id":"integration_design","normalized_function":"проектирование интеграций","search_terms":["integration architecture","проектирование интеграций"],"evidence":["Интеграционное проектирование"]},{"function_id":"impact_analysis","normalized_function":"анализ влияния","search_terms":["impact analysis","анализ влияния"],"evidence":["Анализ влияния"]}]
+    def title(value,refs):return {"title":value,"derived_from_functions":refs,"evidence":["Архитектурные функции"]}
+    strategies=[{"id":"balanced","kind":"title_and_function","query":balanced,"executable_now":True,"blocked_by":None},{"id":"precision","kind":"title_and_multiple_functions","query":'("Solution Architect") AND ("solution design") AND ("integration architecture")',"executable_now":True,"blocked_by":None},{"id":"title_recall","kind":"title_only","query":'("Solution Architect" OR "Solutions Architect" OR "Архитектор решений")',"executable_now":True,"blocked_by":None},{"id":"functional_recall","kind":"function_only","query":'("solution architecture" OR "solution design") AND ("integration architecture" OR "impact analysis")',"executable_now":False,"blocked_by":"pool_v1_requires_leading_title_group"}]
+    return {"schema_version":2,"generation_basis":"functions_first","vacancy_understanding":{"role_family":"solution_architecture","specialization":"integration_architecture","summary":"Архитектура решений","confidence":0.9},"functional_core":functions,"role_titles":{"strong":[title("Solution Architect",["solution_design"]),title("Архитектор решений",["solution_design"])],"conditional":[title("Solutions Architect",["solution_design"])]},"leadership_intent":{"level":"individual_contributor","evidence":["Нет управления подразделением"]},"strategies":strategies,"selected_strategy":"balanced","unsupported_terms":[{"term":"AWS","reason":"Не подтверждено"}],"warnings":[]}
+def valid_v2_result():
+    plan=valid_v2_plan();return {"plan":plan,"query":plan["strategies"][0]["query"],"profile":nano.build_pool_profile_v1_from_v2(plan)}
+
 def response(code,payload):
     r=Mock();r.status_code=code;r.json.return_value=payload
     return r
@@ -112,18 +122,13 @@ class VacancySearchProfileNormalizationTests(unittest.TestCase):
             with self.subTest(title=title):
                 with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
     def test_string_domain_context_builds_structured_query_without_fallback(self):
-        profile=self.profile('B2B')
-        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            query=nano.generate_resume_language_query(self.vacancy())
-        self.assertEqual(ask.call_count,1);self.assertIn('("Pre-sales Manager" OR "Sales Engineer")',query)
-        functional='("выявление потребностей" OR "customer discovery" OR "демонстрация решения" OR "solution demo")'
-        self.assertIn(functional,query);self.assertIn('("B2B")',query);self.assertEqual(query.count(' AND '),2)
-        self.assertEqual(nano.validate_hh_query_syntax(query),query);self.assertNotEqual(query,'"Pre-sale Manager"')
+        plan=valid_v2_plan();expected=plan["strategies"][0]["query"]
+        with patch.object(nano,"ask",return_value=json.dumps(plan,ensure_ascii=False)) as ask:query=nano.generate_resume_language_query(self.vacancy())
+        ask.assert_called_once();self.assertEqual(query,expected)
     def test_invalid_profile_still_uses_title_fallback_once(self):
-        profile=self.profile(None)
-        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            self.assertEqual(nano.generate_resume_language_query(self.vacancy()),'"Pre-sale Manager"')
-        self.assertEqual(ask.call_count,1)
+        with patch.object(nano,"ask",return_value='{"invalid":true}') as ask:
+            with self.assertRaises(AIUnavailableError) as caught:nano.generate_resume_language_query(self.vacancy())
+        self.assertTrue(caught.exception.request_sent);ask.assert_called_once()
 
 
 class VacancySearchProfileRationaleTests(unittest.TestCase):
@@ -168,16 +173,13 @@ class VacancySearchProfileRationaleTests(unittest.TestCase):
         profile=self.profile();profile['accepted_role_titles']='Head of Analytics';profile['rationale']['accepted_role_titles']={'Head of Analytics':'Опыт управления и работы с клиентами'}
         with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
     def test_exact_full_profile_builds_structured_query_with_one_ai_call(self):
-        profile=self.profile()
-        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            query=nano.generate_resume_language_query({'name':'Pre-sale Manager'})
-        self.assertEqual(ask.call_count,1);self.assertIn('("Pre-sales Manager" OR "Sales Engineer" OR "Solution Consultant")',query)
-        self.assertIn('customer discovery',query);self.assertIn('solution demo',query);self.assertNotEqual(query,'"Pre-sale Manager"')
+        plan=valid_v2_plan();expected=plan["strategies"][0]["query"]
+        with patch.object(nano,"ask",return_value=json.dumps(plan,ensure_ascii=False)) as ask:query=nano.generate_resume_language_query({"name":"Solution Architect"})
+        ask.assert_called_once();self.assertEqual(query,expected)
     def test_invalid_rationale_uses_safe_fallback_without_second_ai_call(self):
-        profile=self.profile();profile['rationale']='общее обоснование'
-        with patch.object(nano,'ask',return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            self.assertEqual(nano.generate_resume_language_query({'name':'Pre-sale Manager'}),'"Pre-sale Manager"')
-        self.assertEqual(ask.call_count,1)
+        with patch.object(nano,"ask",return_value='{"invalid":true}') as ask:
+            with self.assertRaises(AIUnavailableError) as caught:nano.generate_resume_language_query({"name":"Solution Architect"})
+        self.assertTrue(caught.exception.request_sent);ask.assert_called_once()
 
 
 class VacancySearchProfileContextTests(unittest.TestCase):
@@ -238,19 +240,17 @@ class VacancySearchPlanLeadershipTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):nano.validate_vacancy_search_profile(profile)
     def test_generate_search_plan_uses_one_ai_call(self):
-        profile=self.profile()
-        with patch.object(nano,"ask",return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            plan=nano.generate_vacancy_search_plan({"name":"Pre-sale Manager"})
-        self.assertEqual(ask.call_count,1);self.assertEqual(plan["profile"]["leadership_intent"]["level"],"individual_contributor");self.assertEqual(plan["query"].count(" AND "),2)
+        plan=valid_v2_plan()
+        with patch.object(nano,"ask",return_value=json.dumps(plan,ensure_ascii=False)) as ask:result=nano.generate_vacancy_search_plan({"name":"Solution Architect"})
+        ask.assert_called_once();self.assertEqual(set(result),{"plan","query","profile"});self.assertEqual(result["plan"]["schema_version"],2);self.assertEqual(result["query"],plan["strategies"][0]["query"]);self.assertIn("accepted_role_titles",result["profile"])
     def test_compatibility_wrapper_returns_only_query_with_one_ai_call(self):
-        profile=self.profile()
-        with patch.object(nano,"ask",return_value=json.dumps(profile,ensure_ascii=False)) as ask:
-            query=nano.generate_resume_language_query({"name":"Pre-sale Manager"})
-        self.assertEqual(ask.call_count,1);self.assertIsInstance(query,str);self.assertIn('("B2B")',query)
+        plan=valid_v2_plan();expected=plan["strategies"][0]["query"]
+        with patch.object(nano,"ask",return_value=json.dumps(plan,ensure_ascii=False)) as ask:query=nano.generate_resume_language_query({"name":"Solution Architect"})
+        ask.assert_called_once();self.assertEqual(query,expected)
     def test_invalid_profile_preserves_safe_fallback(self):
         with patch.object(nano,"ask",return_value='{"invalid":true}') as ask:
-            plan=nano.generate_vacancy_search_plan({"name":"Pre-sale Manager"})
-        self.assertEqual(ask.call_count,1);self.assertIsNone(plan["profile"]);self.assertEqual(plan["query"],'"Pre-sale Manager"')
+            with self.assertRaises(AIUnavailableError) as caught:nano.generate_vacancy_search_plan({"name":"Solution Architect"})
+        self.assertTrue(caught.exception.request_sent);ask.assert_called_once()
 
 
 class CurrentOrLatestExperienceTests(unittest.TestCase):
@@ -367,10 +367,9 @@ class CleanPoolFilteringTests(unittest.TestCase):
 
 class CleanPoolSearchPlanFlowTests(unittest.TestCase):
     def test_prepare_query_saves_profile_with_review(self):
-        plan={"profile":{"leadership_intent":{"level":"unknown","evidence":["x"]}},"query":"\"Role\""}
-        with patch.object(service,"validate_nano_settings",return_value=[]),patch.object(service,"fetch_vacancy_details",return_value={"name":"Role"}),patch.object(service,"generate_vacancy_search_plan",return_value=plan),patch.object(service,"set_review") as review,patch.object(service,"update_task") as update:
-            service.prepare_query("v","t","hh")
-        review.assert_called_once_with("t",'"Role"',vacancy_search_profile=plan["profile"]);update.assert_not_called()
+        result=valid_v2_result()
+        with patch.object(service,"validate_nano_settings",return_value=[]),patch.object(service,"fetch_vacancy_details",return_value={"name":"Role"}),patch.object(service,"generate_vacancy_search_plan",return_value=result),patch.object(service,"set_review") as review,patch.object(service,"update_task") as update:service.prepare_query("v","t","hh")
+        review.assert_called_once_with("t",result["query"],vacancy_search_profile=result["profile"],vacancy_search_plan=result["plan"]);update.assert_not_called()
     def test_workflow_metrics_include_clean_pool_counters(self):
         metrics=workflow._metrics()
         for key in ("excluded_professional_mismatch","excluded_leadership_mismatch","excluded_level_mismatch","level_unknown_kept"):self.assertIn(key,metrics)
@@ -412,10 +411,9 @@ class AtomicReviewPersistenceTests(unittest.TestCase):
 
 class AtomicPrepareQueryTests(unittest.TestCase):
     def test_hh_prepare_calls_set_review_once_with_profile_and_never_updates_after(self):
-        plan={'profile':{'leadership_intent':{'level':'unknown','evidence':['Недостаточно данных.']}},'query':'"Role"'}
-        with patch.object(service,'validate_nano_settings',return_value=[]),patch.object(service,'fetch_vacancy_details',return_value={'name':'Role'}),patch.object(service,'generate_vacancy_search_plan',return_value=plan),patch.object(service,'set_review') as review,patch.object(service,'update_task') as update:
-            service.prepare_query('vacancy','task','hh')
-        review.assert_called_once_with('task','"Role"',vacancy_search_profile=plan['profile']);update.assert_not_called()
+        result=valid_v2_result()
+        with patch.object(service,"validate_nano_settings",return_value=[]),patch.object(service,"fetch_vacancy_details",return_value={"name":"Role"}),patch.object(service,"generate_vacancy_search_plan",return_value=result),patch.object(service,"set_review") as review,patch.object(service,"update_task") as update:service.prepare_query("v","t","hh")
+        review.assert_called_once_with("t",result["query"],vacancy_search_profile=result["profile"],vacancy_search_plan=result["plan"]);update.assert_not_called()
     def test_xray_prepare_does_not_attach_hh_profile(self):
         with patch.object(service,'validate_nano_settings',return_value=[]),patch.object(service,'fetch_vacancy_details',return_value={'name':'Role','area':{'name':'Almaty'}}),patch.object(state,'get_task',return_value={'xray_sources':[]}) as get_task,patch.object(service,'generate_xray_query',return_value=['Role']) as generate_xray,patch.object(xray_plan,'build_plan',return_value='xray query') as build_plan,patch.object(service,'generate_vacancy_search_plan') as generate_hh_plan,patch.object(service,'set_review') as review,patch.object(service,'update_task') as update:
             service.prepare_query('vacancy','task','xray')
@@ -1234,9 +1232,9 @@ class ResumeQueryValidationTests(unittest.TestCase):
     def valid_profile(self):
         return {'role_family':'presales','leadership_intent':{'level':'individual_contributor','evidence':['Вакансия описывает выполнение профессиональных функций без управления подразделением.']},'target_functions':['выявление потребностей','демонстрация решения'],'accepted_role_titles':['Pre-sale менеджер','Sales Engineer'],'mandatory_search_concepts':[{'concept_id':'discovery','alternatives':['выявление потребностей','customer discovery']},{'concept_id':'demo','alternatives':['демонстрация решения','solution demo']}],'domain_context':['B2B'],'preferred_concepts':['RFP'],'excluded_role_families':['analytics_without_presales'],'excluded_titles':[],'rationale':{'role_family':'Presales функции','accepted_role_titles':{'Sales Engineer':'Presales discovery demo сделки'},'excluded_titles':{}}}
     def test_generate_safe(self):
-        with patch.object(nano,'ask',return_value=json.dumps(self.valid_profile(),ensure_ascii=False)) as ask:
-            query=nano.generate_resume_language_query(self.VACANCY)
-        self.assertEqual(query,nano.render_hh_query(self.valid_profile(),vacancy=self.VACANCY));self.assertEqual(ask.call_count,1)
+        plan=valid_v2_plan();expected=plan["strategies"][0]["query"]
+        with patch.object(nano,"ask",return_value=json.dumps(plan,ensure_ascii=False)) as ask:query=nano.generate_resume_language_query(self.VACANCY)
+        ask.assert_called_once();self.assertEqual(query,expected)
     def test_generate_narrow(self):
         query=self.SAFE+' AND ("extra") AND ("fourth")'
         with self.assertRaises(AIUnavailableError):nano.validate_resume_language_query(query,self.VACANCY)

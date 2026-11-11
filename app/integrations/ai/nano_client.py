@@ -19,39 +19,7 @@ LIMITS = {
     "additional_conditions": 5,
 }
 
-QUERY_SYSTEM = """Верни только валидный VacancySearchProfile JSON без markdown.
-Поля: role_family, target_functions, accepted_role_titles, mandatory_search_concepts,
-domain_context, preferred_concepts, excluded_role_families, excluded_titles, leadership_intent, rationale.
-Все поля target_functions, accepted_role_titles, domain_context, preferred_concepts,
-excluded_role_families и excluded_titles должны быть JSON-массивами строк, даже если элемент один.
-mandatory_search_concepts всегда массив объектов concept_id/alternatives.
-leadership_intent всегда JSON object строго следующей формы:
-"leadership_intent": {
-  "level": "individual_contributor|leadership|unknown",
-  "evidence": ["конкретный фрагмент вакансии"]
-}
-evidence всегда непустой JSON-массив непустых строк, дословно основанных на вакансии.
-manager, менеджер, lead, ведущий, senior, старший, principal и эксперт сами по себе
-не доказывают leadership. Для leadership нужны сильный title или явное управление людьми/подразделением.
-rationale всегда JSON object строго следующей формы:
-"rationale": {
-  "role_family": "непустое обоснование role_family",
-  "accepted_role_titles": {
-    "точное значение из accepted_role_titles": "функциональное обоснование"
-  },
-  "excluded_titles": {
-    "точное значение из excluded_titles": "обоснование исключения"
-  }
-}
-rationale.accepted_role_titles и rationale.excluded_titles всегда JSON objects, не строки и не списки.
-Если соответствующий top-level список пуст, верни {}. Ключи rationale.accepted_role_titles должны
-точно соответствовать titles, которым требуется обоснование. Не добавляй отсутствующие роли.
-Альтернативные titles должны быть функционально эквивалентны. Business Analyst и System Analyst
-не являются автоматическими синонимами Presales. Sales Engineer, Solution Consultant и
-Руководитель пресейла допустимы при функциональном обосновании. Общие слова manager, lead,
-product, client, B2B, presentation и solution не являются target function сами по себе.
-Не формируй query, не используй NOT и не добавляй отсутствующие в вакансии роли.
-"""
+QUERY_SYSTEM = """Верни только JSON Query Generation V2 без markdown, code fences, комментариев или текста вне JSON. Работай function-first: professional functions -> role family -> specialization -> market role titles -> четыре стратегии. Exact fields: schema_version, generation_basis, vacancy_understanding, functional_core, role_titles, leadership_intent, strategies, selected_strategy, unsupported_terms, warnings. schema_version=2; generation_basis=functions_first; selected_strategy=balanced. Не копируй hybrid vacancy title автоматически. Все query titles объявлены в role_titles и имеют derived_from_functions и evidence. Все functional query terms объявлены в functional_core.search_terms. Search terms evidence-grounded, market-language, до 80 Unicode chars и 6 слов, преимущественно 1-4 слова, не employer prose. Запрещены standalone: информационные технологии, ИТ-подразделение компании, бизнес-заказчики, корпоративные информационные системы, инфраструктура; архитектура инфраструктуры допустима. Запрещены неподтверждённые technologies/titles, NOT, city/area, multiline query, более двух top-level AND, title-only selected strategy. Верни balanced, precision, title_recall, functional_recall по строгой схеме."""
 
 EVALUATION_SYSTEM = """Ты выполняешь предварительное профессиональное сопоставление резюме с вакансией
 как опытный специалист по подбору персонала. Это инструмент поддержки решения, а не автоматическое решение о найме.
@@ -507,17 +475,172 @@ def safe_vacancy_title_fallback(vacancy):
     query = _quote(title)
     return validate_hh_query_syntax(query, vacancy=prepared, max_length=1800)
 
+
+V2_PLAN_FIELDS = {"schema_version","generation_basis","vacancy_understanding","functional_core","role_titles","leadership_intent","strategies","selected_strategy","unsupported_terms","warnings"}
+V2_STRATEGY_META = {"balanced":("title_and_function",True,None),"precision":("title_and_multiple_functions",True,None),"title_recall":("title_only",True,None),"functional_recall":("function_only",False,"pool_v1_requires_leading_title_group")}
+V2_GENERIC_TERMS = {"информационные технологии","ит-подразделение компании","бизнес-заказчики","корпоративные информационные системы","инфраструктура"}
+def _v2_nonempty(value, field, one_line=False):
+    if not isinstance(value,str) or not value.strip() or (one_line and ("\n" in value or "\r" in value)):raise ValueError(field)
+    return value
+def _v2_string_list(value,field):
+    if not isinstance(value,list) or not value:raise ValueError(field)
+    for x in value:_v2_nonempty(x,field)
+    return value
+def _v2_norm(value):return re.sub(r"\s+"," ",re.sub(r"[‐‑‒–—−_/\\-]+"," ",value.casefold().replace("ё","е"))).strip()
+def _v2_phrase(text,phrase):
+    words=re.findall(r"\w+",_v2_norm(phrase),re.UNICODE)
+    return bool(words) and re.search(r"(?<!\w)"+r"\s+".join(map(re.escape,words))+r"(?!\w)",_v2_norm(text),re.UNICODE) is not None
+def _v2_parse(query):
+    _v2_nonempty(query,"query",True)
+    if len(query)>1800 or query.count('"')%2:raise ValueError('query syntax')
+    depth=0;quoted=False;outside=[]
+    for c in query:
+        if c=='"':quoted=not quoted
+        elif not quoted:
+            outside.append(c)
+            if c=='(':depth+=1
+            elif c==')':
+                depth-=1
+                if depth<0:raise ValueError('query syntax')
+    if depth or re.search(r"\(\s*\)",query):raise ValueError('query syntax')
+    masked=re.sub(r'"[^"\r\n]*"',' Q ',query)
+    if re.search(r"(?<!\w)NOT(?!\w)",masked,re.I) or re.search(r"(?<!\w)(?:AND|OR)\s+(?:AND|OR)(?!\w)",masked,re.I):raise ValueError('query syntax')
+    if re.match(r"\s*(?:AND|OR)(?!\w)",masked,re.I) or re.search(r"(?<!\w)(?:AND|OR)\s*$",masked,re.I):raise ValueError('query syntax')
+    groups=[];start=None;depth=0;quoted=False;i=0;ands=0
+    while i<len(query):
+        c=query[i]
+        if c=='"':quoted=not quoted
+        elif not quoted:
+            if c=='(':
+                if depth==0:start=i
+                depth+=1
+            elif c==')':
+                depth-=1
+                if depth==0:groups.append(query[start:i+1])
+            elif depth==0:
+                m=re.match(r"(?<!\w)AND(?!\w)",query[i:],re.I)
+                if m:ands+=1;i+=2
+        i+=1
+    if ands>2 or not groups:raise ValueError('query groups')
+    residue=query
+    for g in groups:residue=residue.replace(g,' ',1)
+    residue=re.sub(r"(?<!\w)AND(?!\w)",' ',residue,flags=re.I)
+    if residue.strip():raise ValueError('text outside groups')
+    parsed=[]
+    for g in groups:
+        phrases=re.findall(r'"([^"\r\n]+)"',g)
+        rest=re.sub(r'"[^"\r\n]+"','',g[1:-1]);rest=re.sub(r"(?<!\w)OR(?!\w)",'',rest,flags=re.I)
+        if not phrases or rest.strip():raise ValueError('unquoted query term')
+        parsed.append(phrases)
+    return parsed,ands
+def _v2_declared(plan):
+    titles={x['title'].casefold() for b in plan['role_titles'].values() for x in b};terms={x.casefold() for f in plan['functional_core'] for x in f['search_terms']}
+    return titles,terms
+def validate_search_strategy_v2(strategy,plan,vacancy):
+    import copy
+    if not isinstance(strategy,dict) or set(strategy)!={"id","kind","query","executable_now","blocked_by"}:raise TypeError('strategy')
+    sid=strategy['id'];meta=V2_STRATEGY_META.get(sid)
+    if not meta or (strategy['kind'],strategy['executable_now'],strategy['blocked_by'])!=meta or type(strategy['executable_now']) is not bool:raise ValueError('strategy metadata')
+    groups,ands=_v2_parse(strategy['query']);titles,terms=_v2_declared(plan);sets=[{x.casefold() for x in g} for g in groups]
+    for value in (vacancy.get('area'),vacancy.get('city')):
+        if isinstance(value,dict):value=value.get('name')
+        if value and _v2_phrase(strategy['query'],str(value)):raise ValueError('city')
+    for item in plan['unsupported_terms']:
+        if _v2_phrase(strategy['query'],item['term']):raise ValueError('unsupported')
+    balanced=next((x for x in plan['strategies'] if x.get('id')=='balanced'),None)
+    if sid=='balanced':
+        if ands!=1 or len(groups)!=2 or not sets[0]<=titles or not sets[1]<=terms:raise ValueError('balanced')
+        strong={x['title'].casefold() for x in plan['role_titles']['strong']}
+        if not sets[0]&strong:raise ValueError('balanced strong')
+    elif sid=='precision':
+        bg,_=_v2_parse(balanced['query']);bt={x.casefold() for x in bg[0]}
+        if ands not in (1,2) or len(groups) not in (2,3) or not sets[0]<=bt or len(sets[0])>len(bt) or any(not x<=terms for x in sets[1:]) or len(groups)-1<len(bg)-1:raise ValueError('precision')
+    elif sid=='title_recall':
+        bg,_=_v2_parse(balanced['query']);bt={x.casefold() for x in bg[0]}
+        if ands or len(groups)!=1 or not bt<=sets[0] or not sets[0]<=titles:raise ValueError('title recall')
+    else:
+        if ands not in (0,1) or len(groups) not in (1,2) or any(x&titles or not x<=terms for x in sets):raise ValueError('functional recall')
+    return copy.deepcopy(strategy)
+def validate_vacancy_search_plan_v2(plan,vacancy):
+    import copy
+    if not isinstance(plan,dict) or set(plan)!=V2_PLAN_FIELDS:raise TypeError('plan')
+    if plan['schema_version']!=2 or type(plan['schema_version']) is bool or plan['generation_basis']!='functions_first' or plan['selected_strategy']!='balanced':raise ValueError('version')
+    u=plan['vacancy_understanding']
+    if not isinstance(u,dict) or set(u)!={"role_family","specialization","summary","confidence"}:raise ValueError('understanding')
+    _v2_nonempty(u['role_family'],'role_family');_v2_nonempty(u['summary'],'summary')
+    if u['specialization'] is not None:_v2_nonempty(u['specialization'],'specialization')
+    if isinstance(u['confidence'],bool) or not isinstance(u['confidence'],(int,float)) or not 0<=u['confidence']<=1:raise ValueError('confidence')
+    if not isinstance(plan['functional_core'],list) or not plan['functional_core']:raise ValueError('functional_core')
+    ids=set()
+    for f in plan['functional_core']:
+        if not isinstance(f,dict) or set(f)!={"function_id","normalized_function","search_terms","evidence"}:raise ValueError('function')
+        fid=f['function_id'];_v2_nonempty(fid,'function_id')
+        if not re.fullmatch(r'[a-z][a-z0-9_]{1,63}',fid) or fid.casefold() in ids:raise ValueError('function_id')
+        ids.add(fid.casefold());_v2_nonempty(f['normalized_function'],'normalized_function',True);_v2_string_list(f['search_terms'],'search_terms');_v2_string_list(f['evidence'],'evidence')
+        seen=set()
+        for term in f['search_terms']:
+            _v2_nonempty(term,'term',True);key=_v2_norm(term)
+            if len(term)>80 or len(term.split())>6 or term.rstrip().endswith(('.', ';')) or key in seen or key in {_v2_norm(x) for x in V2_GENERIC_TERMS}:raise ValueError('term')
+            seen.add(key)
+    if not isinstance(plan['role_titles'],dict) or set(plan['role_titles'])!={'strong','conditional'}:raise ValueError('titles')
+    title_seen=set();all_titles=[]
+    for bucket in ('strong','conditional'):
+        if not isinstance(plan['role_titles'][bucket],list):raise ValueError('titles')
+        for item in plan['role_titles'][bucket]:
+            if not isinstance(item,dict) or set(item)!={'title','derived_from_functions','evidence'}:raise ValueError('title item')
+            _v2_nonempty(item['title'],'title',True);_v2_string_list(item['derived_from_functions'],'derived');_v2_string_list(item['evidence'],'title evidence')
+            key=item['title'].casefold()
+            if key in title_seen or any(x.casefold() not in ids for x in item['derived_from_functions']):raise ValueError('title provenance')
+            title_seen.add(key);all_titles.append(item)
+    if all_titles and all(item['evidence']==[vacancy.get('name')] for item in all_titles):raise ValueError('title evidence')
+    lead=plan['leadership_intent']
+    if not isinstance(lead,dict) or set(lead)!={'level','evidence'} or lead.get('level') not in {'individual_contributor','leadership','unknown'}:raise ValueError('leadership')
+    _v2_string_list(lead['evidence'],'leadership evidence')
+    if lead['level']=='leadership' and all(_v2_norm(x) in {'senior manager','manager','lead','senior','ведущий','старший','principal','эксперт'} for x in lead['evidence']):raise ValueError('leadership evidence')
+    if not isinstance(plan['unsupported_terms'],list) or not isinstance(plan['warnings'],list):raise ValueError('audit')
+    for item in plan['unsupported_terms']:
+        if not isinstance(item, dict):
+            raise ValueError('unsupported')
+        if set(item) != {'term', 'reason'}:
+            raise ValueError('unsupported')
+        _v2_nonempty(item['term'], 'unsupported term')
+        _v2_nonempty(item['reason'], 'unsupported reason')
+    for x in plan['warnings']:_v2_nonempty(x,'warning')
+    if not isinstance(plan['strategies'],list) or len(plan['strategies'])!=4 or {x.get('id') for x in plan['strategies'] if isinstance(x,dict)}!=set(V2_STRATEGY_META):raise ValueError('strategies')
+    if len({_v2_norm(x['query']) for x in plan['strategies']})!=4:raise ValueError('duplicate queries')
+    for s in plan['strategies']:validate_search_strategy_v2(s,plan,vacancy)
+    return copy.deepcopy(plan)
+def build_pool_profile_v1_from_v2(plan):
+    import copy
+    if not isinstance(plan,dict) or not isinstance(plan.get('functional_core'),list) or not isinstance(plan.get('role_titles'),dict):raise TypeError('plan')
+    functions={x['function_id']:x['normalized_function'] for x in plan['functional_core']};titles=[];reasons={};seen=set()
+    for bucket in ('strong','conditional'):
+        for item in plan['role_titles'][bucket]:
+            key=item['title'].casefold()
+            if key not in seen:
+                seen.add(key);titles.append(item['title']);reasons[item['title']]='; '.join(functions[x] for x in item['derived_from_functions'])
+    result={'role_family':plan['vacancy_understanding']['role_family'],'target_functions':[x['normalized_function'] for x in plan['functional_core']],'accepted_role_titles':titles,'mandatory_search_concepts':[{'concept_id':x['function_id'],'alternatives':copy.deepcopy(x['search_terms'])} for x in plan['functional_core']],'domain_context':[],'preferred_concepts':[],'excluded_role_families':[],'excluded_titles':[],'leadership_intent':copy.deepcopy(plan['leadership_intent']),'rationale':{'role_family':plan['vacancy_understanding']['summary'],'accepted_role_titles':reasons,'excluded_titles':{}}}
+    blob=json.dumps(result,ensure_ascii=False)
+    for item in plan.get('unsupported_terms',[]):
+        if _v2_phrase(blob,item['term']):raise ValueError('unsupported projection')
+    return result
+
 def generate_vacancy_search_plan(vacancy: dict) -> dict:
-    prepared=prepare_vacancy(vacancy)
-    prompt="Сформируй VacancySearchProfile JSON по вакансии: "+json.dumps(prepared,ensure_ascii=False,default=str)
-    raw=re.sub(r"^```(?:json)?\s*|\s*```$","",ask(prompt,QUERY_SYSTEM).strip(),flags=re.I|re.S).strip()
+    prepared = prepare_vacancy(vacancy)
+    prompt = "Сформируй Query Generation V2 JSON по вакансии: " + json.dumps(prepared, ensure_ascii=False, default=str)
+    raw = ask(prompt, QUERY_SYSTEM).strip()
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
     try:
-        profile=validate_vacancy_search_profile(json.loads(raw))
-        query=render_hh_query(profile, vacancy=prepared)
-        return {"profile":profile,"query":query}
-    except (ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
-        logger.warning("VacancySearchProfile отклонен; используется безопасный title fallback: %s",exc)
-        return {"profile":None,"query":safe_vacancy_title_fallback(vacancy)}
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict): raise TypeError("root")
+        validated_plan = validate_vacancy_search_plan_v2(parsed, prepared)
+        selected_strategy = next(x for x in validated_plan["strategies"] if x["id"] == validated_plan["selected_strategy"])
+        if selected_strategy["id"] != "balanced": raise ValueError("selected strategy")
+        compatibility_profile = build_pool_profile_v1_from_v2(validated_plan)
+        return {"plan": validated_plan, "query": selected_strategy["query"], "profile": compatibility_profile}
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        logger.warning("Query Generation V2 response rejected: validation failed")
+        raise AIUnavailableError("ИИ вернул некорректный план поиска. Требуется повторная генерация вручную.", request_sent=True) from exc
 
 
 def generate_resume_language_query(vacancy: dict) -> str:
@@ -677,4 +800,3 @@ def generate_xray_query(vacancy):
     if not query:
         raise AIUnavailableError("ИИ не сформировал X-Ray запрос.", request_sent=True)
     return query
-
