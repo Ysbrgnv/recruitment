@@ -63,6 +63,33 @@ def generator_result():
     profile = require_api("build_pool_profile_v1_from_v2")(plan)
     return {"plan": plan, "query": GOLDEN_BALANCED_QUERY, "profile": profile}
 
+
+def _extract_query_system_schema_example():
+    prompt = nano.QUERY_SYSTEM
+    begin = "QUERY_PLAN_SCHEMA_BEGIN"
+    end = "QUERY_PLAN_SCHEMA_END"
+    if prompt.count(begin) != 1 or prompt.count(end) != 1:
+        raise AssertionError("QUERY_SYSTEM must contain exactly one schema marker pair")
+    schema_text = prompt.split(begin, 1)[1].split(end, 1)[0].strip()
+    if schema_text.startswith("```") or schema_text.endswith("```"):
+        raise AssertionError("Schema example must be raw JSON without markdown fences")
+    return json.loads(schema_text)
+
+def _normalized_prompt_text():
+    import re
+    return re.sub(r"\s+", " ", nano.QUERY_SYSTEM.casefold().replace("ё", "е")).strip()
+
+def _replace_quoted_phrase_in_strategies(plan, old, new):
+    needle = f'"{old}"'
+    replacement = f'"{new}"'
+    changed = 0
+    for strategy in plan["strategies"]:
+        before = strategy["query"]
+        strategy["query"] = before.replace(needle, replacement)
+        changed += before.count(needle)
+    if changed == 0:
+        raise AssertionError(f"Quoted phrase not found: {old}")
+
 class QueryGenerationV2ApiTests(unittest.TestCase):
     def test_future_validator_api_is_required(self): self.assertTrue(callable(require_api("validate_vacancy_search_plan_v2")))
     def test_future_strategy_validator_api_is_required(self): self.assertTrue(callable(require_api("validate_search_strategy_v2")))
@@ -254,6 +281,94 @@ class QueryGenerationV2ProjectionTests(ContractCase):
         second = project(copy.deepcopy(golden_plan()))
         self.assertEqual(first, second)
     def test_projection_excludes_unsupported(self): self.assertTrue(all(x not in json.dumps(require_api("build_pool_profile_v1_from_v2")(golden_plan())) for x in ("AWS","Azure","Kafka")))
+    def test_projection_rejects_malformed_direct_input_with_contract_error(self):
+        mutations = (lambda p: p.pop("vacancy_understanding"), lambda p: p["functional_core"][0].pop("normalized_function"), lambda p: p.update(role_titles=[]), lambda p: p.pop("leadership_intent"))
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                plan = golden_plan(); mutate(plan)
+                with self.assertRaises((ValueError, TypeError)): nano.build_pool_profile_v1_from_v2(plan)
+
+
+class QueryGenerationV2PromptContractTests(unittest.TestCase):
+    def test_query_system_documents_all_top_level_fields(self):
+        example = _extract_query_system_schema_example()
+        self.assertEqual(set(example), {"schema_version", "generation_basis", "vacancy_understanding", "functional_core", "role_titles", "leadership_intent", "strategies", "selected_strategy", "unsupported_terms", "warnings"})
+        self.assertEqual((example["schema_version"], example["generation_basis"], example["selected_strategy"]), (2, "functions_first", "balanced"))
+    def test_query_system_documents_vacancy_understanding_schema(self):
+        self.assertEqual(set(_extract_query_system_schema_example()["vacancy_understanding"]), {"role_family", "specialization", "summary", "confidence"})
+    def test_query_system_documents_functional_core_schema(self):
+        items = _extract_query_system_schema_example()["functional_core"]
+        self.assertGreater(len(items), 0)
+        for item in items: self.assertEqual(set(item), {"function_id", "normalized_function", "search_terms", "evidence"})
+    def test_query_system_documents_role_title_schema(self):
+        roles = _extract_query_system_schema_example()["role_titles"]
+        self.assertEqual(set(roles), {"strong", "conditional"}); self.assertTrue(roles["strong"]); self.assertTrue(roles["conditional"])
+        for bucket in roles.values():
+            for item in bucket: self.assertEqual(set(item), {"title", "derived_from_functions", "evidence"})
+    def test_query_system_documents_leadership_schema(self):
+        self.assertEqual(set(_extract_query_system_schema_example()["leadership_intent"]), {"level", "evidence"})
+    def test_query_system_documents_strategy_schema(self):
+        strategies = _extract_query_system_schema_example()["strategies"]
+        self.assertEqual(len(strategies), 4)
+        for item in strategies: self.assertEqual(set(item), {"id", "kind", "query", "executable_now", "blocked_by"})
+    def test_query_system_documents_unsupported_term_schema(self):
+        items = _extract_query_system_schema_example()["unsupported_terms"]
+        self.assertGreater(len(items), 0)
+        for item in items: self.assertEqual(set(item), {"term", "reason"})
+    def test_query_system_documents_all_strategy_ids(self):
+        self.assertEqual({x["id"] for x in _extract_query_system_schema_example()["strategies"]}, {"balanced", "precision", "title_recall", "functional_recall"})
+    def test_query_system_documents_functional_recall_metadata(self):
+        by_id = {x["id"]: x for x in _extract_query_system_schema_example()["strategies"]}
+        self.assertEqual((by_id["balanced"]["kind"], by_id["balanced"]["executable_now"], by_id["balanced"]["blocked_by"]), ("title_and_function", True, None))
+        self.assertEqual((by_id["precision"]["kind"], by_id["precision"]["executable_now"], by_id["precision"]["blocked_by"]), ("title_and_multiple_functions", True, None))
+        self.assertEqual((by_id["title_recall"]["kind"], by_id["title_recall"]["executable_now"], by_id["title_recall"]["blocked_by"]), ("title_only", True, None))
+        self.assertEqual((by_id["functional_recall"]["kind"], by_id["functional_recall"]["executable_now"], by_id["functional_recall"]["blocked_by"]), ("function_only", False, "pool_v1_requires_leading_title_group"))
+    def test_query_system_documents_query_provenance_rules(self):
+        prose = _normalized_prompt_text().split("QUERY_PLAN_SCHEMA_BEGIN".casefold(), 1)[0]
+        for token in ("query title", "role_titles", "query functional term", "functional_core.search_terms", "undeclared title", "forbidden", "undeclared functional term"):
+            self.assertIn(token, prose)
+    def test_query_system_documents_strategy_query_shapes(self):
+        prose = _normalized_prompt_text().split("QUERY_PLAN_SCHEMA_BEGIN".casefold(), 1)[0]
+        for token in ("balanced", "title or-group", "functional or-group", "precision", "one or two functional or-groups", "title_recall", "without top-level and", "functional_recall", "no role titles"):
+            self.assertIn(token, prose)
+
+class QueryGenerationV2LeadershipEvidenceTests(unittest.TestCase):
+    def test_weak_leadership_titles_do_not_prove_leadership(self):
+        for evidence in ("Senior Manager with strategic responsibilities", "Lead stakeholder communication", "Principal expert", "Ведущий архитектор", "Старший менеджер проектов"):
+            with self.subTest(evidence=evidence):
+                plan = golden_plan(); plan["leadership_intent"] = {"level": "leadership", "evidence": [evidence]}
+                with self.assertRaises((ValueError, TypeError)): nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)
+    def test_explicit_people_management_proves_leadership(self):
+        for evidence in ("Управление командой из 8 человек", "5 direct reports", "Hiring and performance management responsibility", "Руководство подразделением"):
+            with self.subTest(evidence=evidence):
+                plan = golden_plan(); plan["leadership_intent"] = {"level": "leadership", "evidence": [evidence]}
+                validated = nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)
+                self.assertEqual(validated["leadership_intent"]["level"], "leadership")
+
+class QueryGenerationV2CanonicalNormalizationTests(unittest.TestCase):
+    def test_title_provenance_uses_canonical_normalization(self):
+        plan = golden_plan()
+        item = next(x for x in plan["role_titles"]["conditional"] if x["title"] == "Интеграционный архитектор")
+        item["title"] = "Интеграционный–архитектор"
+        _replace_quoted_phrase_in_strategies(plan, "Интеграционный архитектор", "Интеграционный-архитектор")
+        self.assertEqual(nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)["schema_version"], 2)
+    def test_function_provenance_uses_canonical_normalization(self):
+        cases = (("solution design", "solution–design", "solution-design"), ("solution architecture", "проектирование ёмких систем", "проектирование емких систем"))
+        for old, declared, queried in cases:
+            with self.subTest(declared=declared):
+                plan = golden_plan(); function = next(x for x in plan["functional_core"] if old in x["search_terms"])
+                function["search_terms"][function["search_terms"].index(old)] = declared
+                _replace_quoted_phrase_in_strategies(plan, old, queried)
+                self.assertEqual(nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)["schema_version"], 2)
+    def test_canonical_duplicate_titles_are_rejected(self):
+        plan = golden_plan(); item = next(x for x in plan["role_titles"]["conditional"] if x["title"] == "Интеграционный архитектор")
+        item["title"] = "Интеграционный–архитектор"; duplicate = copy.deepcopy(item); duplicate["title"] = "Интеграционный-архитектор"; plan["role_titles"]["conditional"].append(duplicate)
+        with self.assertRaises((ValueError, TypeError)): nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)
+    def test_canonical_duplicate_function_terms_are_rejected(self):
+        plan = golden_plan(); function = next(x for x in plan["functional_core"] if "solution design" in x["search_terms"])
+        function["search_terms"][function["search_terms"].index("solution design")] = "solution–design"; function["search_terms"].append("solution-design")
+        with self.assertRaises((ValueError, TypeError)): nano.validate_vacancy_search_plan_v2(plan, GOLDEN_VACANCY)
+
 
 class QueryGenerationV2FixtureSourceContractTests(unittest.TestCase):
     def test_golden_vacancy_has_required_title(self):
