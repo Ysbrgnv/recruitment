@@ -27,9 +27,9 @@ def main():
     role=sys.argv[1] if len(sys.argv)>1 else 'web'
     if role in {'web','general','browser','check-gmail','smoke-browser'}:
         runtime()
-        if role=='web':execute('stage2_web.py')
-        elif role in {'general','browser'}:execute('stage2_worker.py',['--lane',role])
-        elif role=='check-gmail':execute('check_gmail.py')
+        if role=='web':execute('entrypoints/web.py')
+        elif role in {'general','browser'}:execute('entrypoints/worker.py',['--lane',role])
+        elif role=='check-gmail':execute('scripts/diagnostics/check_gmail.py')
         else:
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
@@ -50,10 +50,10 @@ def main():
     elif role=='bootstrap':
         admin()
         os.environ.update(APP_DB_PASSWORD=secret('db_app'),BACKUP_DB_PASSWORD=secret('db_backup'))
-        execute('bootstrap_server.py')
+        execute('scripts/setup/bootstrap_server.py')
     elif role in {'backup','backup-loop'}:
         admin()
-        if role=='backup':execute('backup_verify.py',['--directory','/backups'])
+        if role=='backup':execute('scripts/backup/verify.py',['--directory','/backups'])
         else:
             import threading
             stop=threading.Event();child=None
@@ -62,7 +62,7 @@ def main():
                 if child is not None and child.poll() is None:child.terminate()
             signal.signal(signal.SIGTERM,shutdown);signal.signal(signal.SIGINT,shutdown)
             while not stop.is_set():
-                child=subprocess.Popen([sys.executable,'backup_verify.py','--directory','/backups'])
+                child=subprocess.Popen([sys.executable,'scripts/backup/verify.py','--directory','/backups'])
                 code=child.wait();child=None
                 stop.wait(max(300,int(os.getenv('BACKUP_INTERVAL_SECONDS','86400'))) if code==0 else 300)
     else:raise SystemExit('Unsupported role')
