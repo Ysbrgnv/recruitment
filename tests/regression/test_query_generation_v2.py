@@ -36,7 +36,13 @@ def golden_plan():
         function_item("impact_analysis", "анализ влияния", ["impact analysis", "анализ влияния", "архитектура инфраструктуры"], ["impact analysis на инфраструктуру и информационные системы"]),
     ]
     strong = [title_item("Solution Architect", ["solution_design"]), title_item("Архитектор решений", ["solution_design"]), title_item("Архитектор информационных систем", ["solution_design", "integration_design"])]
-    conditional = [title_item("Integration Architect", ["integration_design"])]
+    conditional = [
+        title_item("Solutions Architect", ["solution_design"]),
+        title_item("IT Architect", ["solution_design"]),
+        title_item("Integration Architect", ["integration_design"]),
+        title_item("Интеграционный архитектор", ["integration_design"]),
+        title_item("Application Architect", ["solution_design", "integration_design"]),
+    ]
     strategies = [
         {"id":"balanced","kind":"title_and_function","query":GOLDEN_BALANCED_QUERY,"executable_now":True,"blocked_by":None},
         {"id":"precision","kind":"title_and_multiple_functions","query":'(“Solution Architect” OR “Архитектор решений”) AND (“solution design” OR “архитектура решения”) AND (“integration architecture” OR “impact analysis”)'.replace('“','"').replace('”','"'),"executable_now":True,"blocked_by":None},
@@ -126,6 +132,36 @@ class QueryGenerationV2StrategyTests(ContractCase):
     def test_multiline_query_rejected(self): self.reject_strategy(lambda s:s.update(query=s["query"]+"\n"))
     def test_unbalanced_quotes_rejected(self): self.reject_strategy(lambda s:s.update(query=s["query"]+" \""))
     def test_unbalanced_parentheses_rejected(self): self.reject_strategy(lambda s:s.update(query=s["query"]+")"))
+    def test_all_strategy_titles_are_declared_in_role_titles(self):
+        plan = golden_plan()
+        validated = require_api("validate_vacancy_search_plan_v2")(plan, GOLDEN_VACANCY)
+        declared = {item["title"].casefold() for bucket in validated["role_titles"].values() for item in bucket}
+        for strategy_id in ("balanced", "precision", "title_recall"):
+            strategy = next(item for item in validated["strategies"] if item["id"] == strategy_id)
+            leading = strategy["query"].split(" AND ", 1)[0]
+            titles = {value.casefold() for value in __import__("re").findall(r'"([^"\r\n]+)"', leading)}
+            self.assertTrue(titles <= declared)
+    def test_undeclared_query_title_is_rejected(self):
+        plan = golden_plan()
+        strategy = next(item for item in plan["strategies"] if item["id"] == "title_recall")
+        strategy["query"] = strategy["query"][:-1] + ' OR "Cloud Architect")'
+        with self.assertRaises((ValueError, TypeError)):
+            require_api("validate_vacancy_search_plan_v2")(plan, GOLDEN_VACANCY)
+    def test_all_strategy_function_terms_are_declared_in_functional_core(self):
+        plan = golden_plan()
+        validated = require_api("validate_vacancy_search_plan_v2")(plan, GOLDEN_VACANCY)
+        titles = {item["title"].casefold() for bucket in validated["role_titles"].values() for item in bucket}
+        declared = {term.casefold() for function in validated["functional_core"] for term in function["search_terms"]}
+        for strategy_id in ("balanced", "precision", "functional_recall"):
+            strategy = next(item for item in validated["strategies"] if item["id"] == strategy_id)
+            quoted = {value.casefold() for value in __import__("re").findall(r'"([^"\r\n]+)"', strategy["query"])}
+            self.assertTrue((quoted - titles) <= declared)
+    def test_undeclared_function_term_is_rejected(self):
+        plan = golden_plan()
+        strategy = next(item for item in plan["strategies"] if item["id"] == "balanced")
+        strategy["query"] = strategy["query"][:-1] + ' OR "cloud migration")'
+        with self.assertRaises((ValueError, TypeError)):
+            require_api("validate_vacancy_search_plan_v2")(plan, GOLDEN_VACANCY)
 
 class QueryGenerationV2SolutionArchitectTests(ContractCase):
     def test_golden_plan_accepted(self): self.assertEqual(validate_plan()["vacancy_understanding"]["role_family"],"solution_architecture")
