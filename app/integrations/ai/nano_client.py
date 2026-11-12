@@ -19,7 +19,7 @@ LIMITS = {
     "additional_conditions": 5,
 }
 
-QUERY_SYSTEM = """Верни только JSON Query Generation V2 без markdown, code fences, комментариев или текста вне JSON. Работай function-first: professional functions -> role family -> specialization -> market role titles -> четыре стратегии. Exact fields: schema_version, generation_basis, vacancy_understanding, functional_core, role_titles, leadership_intent, strategies, selected_strategy, unsupported_terms, warnings. schema_version=2; generation_basis=functions_first; selected_strategy=balanced. Не копируй hybrid vacancy title автоматически. Все query titles объявлены в role_titles и имеют derived_from_functions и evidence. Все functional query terms объявлены в functional_core.search_terms. Search terms evidence-grounded, market-language, до 80 Unicode chars и 6 слов, преимущественно 1-4 слова, не employer prose. Запрещены standalone: информационные технологии, ИТ-подразделение компании, бизнес-заказчики, корпоративные информационные системы, инфраструктура; архитектура инфраструктуры допустима. Запрещены неподтверждённые technologies/titles, NOT, city/area, multiline query, более двух top-level AND, title-only selected strategy. Верни balanced, precision, title_recall, functional_recall по строгой схеме."""
+QUERY_SYSTEM = 'Return JSON only, no markdown, no code fences, comments, or text outside JSON. Work function-first. Every query title must exist in role_titles; an undeclared title is forbidden. Every query functional term must exist in functional_core.search_terms; an undeclared functional term is forbidden. No query-only titles or query-only functional terms. balanced: exactly one top-level AND, title OR-group AND functional OR-group. precision: title OR-group AND one or two functional OR-groups, with one or two top-level AND. title_recall: one title OR-group without top-level AND and no functional terms. functional_recall: one or two functional groups, no role titles, zero or one top-level AND, executable_now=false, blocked_by=pool_v1_requires_leading_title_group. Do not invent unsupported technology. No city/area, NOT, multiline query, or more than two top-level AND. Vacancy title is supporting evidence only.\nQUERY_PLAN_SCHEMA_BEGIN\n{\n  "schema_version": 2,\n  "generation_basis": "functions_first",\n  "vacancy_understanding": {\n    "role_family": "solution_architecture",\n    "specialization": "integration_architecture",\n    "summary": "Architecture design, integration design and impact analysis",\n    "confidence": 0.95\n  },\n  "functional_core": [\n    {\n      "function_id": "solution_design",\n      "normalized_function": "solution architecture design",\n      "search_terms": [\n        "solution architecture",\n        "solution design"\n      ],\n      "evidence": [\n        "Architecture design evidence"\n      ]\n    },\n    {\n      "function_id": "integration_design",\n      "normalized_function": "integration architecture design",\n      "search_terms": [\n        "integration architecture",\n        "integration design"\n      ],\n      "evidence": [\n        "Integration design evidence"\n      ]\n    },\n    {\n      "function_id": "impact_analysis",\n      "normalized_function": "impact analysis",\n      "search_terms": [\n        "impact analysis",\n        "architecture impact"\n      ],\n      "evidence": [\n        "Impact analysis evidence"\n      ]\n    }\n  ],\n  "role_titles": {\n    "strong": [\n      {\n        "title": "Solution Architect",\n        "derived_from_functions": [\n          "solution_design"\n        ],\n        "evidence": [\n          "Architecture design evidence"\n        ]\n      }\n    ],\n    "conditional": [\n      {\n        "title": "Integration Architect",\n        "derived_from_functions": [\n          "integration_design"\n        ],\n        "evidence": [\n          "Integration design evidence"\n        ]\n      }\n    ]\n  },\n  "leadership_intent": {\n    "level": "individual_contributor",\n    "evidence": [\n      "No people or department management requirement"\n    ]\n  },\n  "strategies": [\n    {\n      "id": "balanced",\n      "kind": "title_and_function",\n      "query": "(\\"Solution Architect\\" OR \\"Integration Architect\\") AND (\\"solution architecture\\" OR \\"integration architecture\\")",\n      "executable_now": true,\n      "blocked_by": null\n    },\n    {\n      "id": "precision",\n      "kind": "title_and_multiple_functions",\n      "query": "(\\"Solution Architect\\") AND (\\"solution design\\") AND (\\"impact analysis\\")",\n      "executable_now": true,\n      "blocked_by": null\n    },\n    {\n      "id": "title_recall",\n      "kind": "title_only",\n      "query": "(\\"Solution Architect\\" OR \\"Integration Architect\\")",\n      "executable_now": true,\n      "blocked_by": null\n    },\n    {\n      "id": "functional_recall",\n      "kind": "function_only",\n      "query": "(\\"solution architecture\\" OR \\"solution design\\") AND (\\"integration architecture\\" OR \\"impact analysis\\")",\n      "executable_now": false,\n      "blocked_by": "pool_v1_requires_leading_title_group"\n    }\n  ],\n  "selected_strategy": "balanced",\n  "unsupported_terms": [\n    {\n      "term": "UnconfirmedTechnology",\n      "reason": "Not grounded in vacancy evidence"\n    }\n  ],\n  "warnings": []\n}\nQUERY_PLAN_SCHEMA_END\nUse exact schema and vacancy-grounded values.'
 
 EVALUATION_SYSTEM = """Ты выполняешь предварительное профессиональное сопоставление резюме с вакансией
 как опытный специалист по подбору персонала. Это инструмент поддержки решения, а не автоматическое решение о найме.
@@ -534,14 +534,15 @@ def _v2_parse(query):
         parsed.append(phrases)
     return parsed,ands
 def _v2_declared(plan):
-    titles={x['title'].casefold() for b in plan['role_titles'].values() for x in b};terms={x.casefold() for f in plan['functional_core'] for x in f['search_terms']}
+    titles={_v2_norm(x['title']) for b in plan['role_titles'].values() for x in b}
+    terms={_v2_norm(x) for f in plan['functional_core'] for x in f['search_terms']}
     return titles,terms
 def validate_search_strategy_v2(strategy,plan,vacancy):
     import copy
     if not isinstance(strategy,dict) or set(strategy)!={"id","kind","query","executable_now","blocked_by"}:raise TypeError('strategy')
     sid=strategy['id'];meta=V2_STRATEGY_META.get(sid)
     if not meta or (strategy['kind'],strategy['executable_now'],strategy['blocked_by'])!=meta or type(strategy['executable_now']) is not bool:raise ValueError('strategy metadata')
-    groups,ands=_v2_parse(strategy['query']);titles,terms=_v2_declared(plan);sets=[{x.casefold() for x in g} for g in groups]
+    groups,ands=_v2_parse(strategy['query']);titles,terms=_v2_declared(plan);sets=[{_v2_norm(x) for x in g} for g in groups]
     for value in (vacancy.get('area'),vacancy.get('city')):
         if isinstance(value,dict):value=value.get('name')
         if value and _v2_phrase(strategy['query'],str(value)):raise ValueError('city')
@@ -550,13 +551,13 @@ def validate_search_strategy_v2(strategy,plan,vacancy):
     balanced=next((x for x in plan['strategies'] if x.get('id')=='balanced'),None)
     if sid=='balanced':
         if ands!=1 or len(groups)!=2 or not sets[0]<=titles or not sets[1]<=terms:raise ValueError('balanced')
-        strong={x['title'].casefold() for x in plan['role_titles']['strong']}
+        strong={_v2_norm(x['title']) for x in plan['role_titles']['strong']}
         if not sets[0]&strong:raise ValueError('balanced strong')
     elif sid=='precision':
-        bg,_=_v2_parse(balanced['query']);bt={x.casefold() for x in bg[0]}
+        bg,_=_v2_parse(balanced['query']);bt={_v2_norm(x) for x in bg[0]}
         if ands not in (1,2) or len(groups) not in (2,3) or not sets[0]<=bt or len(sets[0])>len(bt) or any(not x<=terms for x in sets[1:]) or len(groups)-1<len(bg)-1:raise ValueError('precision')
     elif sid=='title_recall':
-        bg,_=_v2_parse(balanced['query']);bt={x.casefold() for x in bg[0]}
+        bg,_=_v2_parse(balanced['query']);bt={_v2_norm(x) for x in bg[0]}
         if ands or len(groups)!=1 or not bt<=sets[0] or not sets[0]<=titles:raise ValueError('title recall')
     else:
         if ands not in (0,1) or len(groups) not in (1,2) or any(x&titles or not x<=terms for x in sets):raise ValueError('functional recall')
@@ -589,14 +590,16 @@ def validate_vacancy_search_plan_v2(plan,vacancy):
         for item in plan['role_titles'][bucket]:
             if not isinstance(item,dict) or set(item)!={'title','derived_from_functions','evidence'}:raise ValueError('title item')
             _v2_nonempty(item['title'],'title',True);_v2_string_list(item['derived_from_functions'],'derived');_v2_string_list(item['evidence'],'title evidence')
-            key=item['title'].casefold()
+            key=_v2_norm(item['title'])
             if key in title_seen or any(x.casefold() not in ids for x in item['derived_from_functions']):raise ValueError('title provenance')
             title_seen.add(key);all_titles.append(item)
     if all_titles and all(item['evidence']==[vacancy.get('name')] for item in all_titles):raise ValueError('title evidence')
     lead=plan['leadership_intent']
     if not isinstance(lead,dict) or set(lead)!={'level','evidence'} or lead.get('level') not in {'individual_contributor','leadership','unknown'}:raise ValueError('leadership')
     _v2_string_list(lead['evidence'],'leadership evidence')
-    if lead['level']=='leadership' and all(_v2_norm(x) in {'senior manager','manager','lead','senior','ведущий','старший','principal','эксперт'} for x in lead['evidence']):raise ValueError('leadership evidence')
+    if lead['level']=='leadership':
+        markers=('people management','team management','manage a team','managing a team','direct report','direct reports','hiring responsibility','performance management responsibility','hiring and performance management responsibility','управление командой','руководство командой','руководство подразделением','управление подразделением','прямые подчиненные','наем сотрудников','найм сотрудников','оценка эффективности сотрудников')
+        if not any(any(_v2_phrase(evidence,marker) for marker in markers) for evidence in lead['evidence']):raise ValueError('leadership evidence')
     if not isinstance(plan['unsupported_terms'],list) or not isinstance(plan['warnings'],list):raise ValueError('audit')
     for item in plan['unsupported_terms']:
         if not isinstance(item, dict):
@@ -610,13 +613,46 @@ def validate_vacancy_search_plan_v2(plan,vacancy):
     if len({_v2_norm(x['query']) for x in plan['strategies']})!=4:raise ValueError('duplicate queries')
     for s in plan['strategies']:validate_search_strategy_v2(s,plan,vacancy)
     return copy.deepcopy(plan)
+def _v2_validate_projection_structure(plan):
+    if not isinstance(plan,dict):raise TypeError('plan')
+    required={'vacancy_understanding','functional_core','role_titles','leadership_intent','unsupported_terms'}
+    if not required<=set(plan):raise ValueError('projection fields')
+    u=plan['vacancy_understanding']
+    if not isinstance(u,dict) or not {'role_family','summary'}<=set(u):raise ValueError('projection understanding')
+    _v2_nonempty(u['role_family'],'role_family');_v2_nonempty(u['summary'],'summary')
+    core=plan['functional_core']
+    if not isinstance(core,list) or not core:raise ValueError('projection functions')
+    ids=set()
+    for item in core:
+        if not isinstance(item,dict) or not {'function_id','normalized_function','search_terms'}<=set(item):raise ValueError('projection function')
+        _v2_nonempty(item['function_id'],'function_id');_v2_nonempty(item['normalized_function'],'normalized_function')
+        if not isinstance(item['search_terms'],list):raise TypeError('search_terms')
+        ids.add(item['function_id'].casefold())
+    roles=plan['role_titles']
+    if not isinstance(roles,dict) or not {'strong','conditional'}<=set(roles):raise ValueError('projection titles')
+    for bucket in ('strong','conditional'):
+        if not isinstance(roles[bucket],list):raise TypeError('projection titles')
+        for item in roles[bucket]:
+            if not isinstance(item,dict) or not {'title','derived_from_functions'}<=set(item):raise ValueError('projection title')
+            _v2_nonempty(item['title'],'title');refs=item['derived_from_functions']
+            if not isinstance(refs,list) or not refs:raise ValueError('projection references')
+            for ref in refs:
+                _v2_nonempty(ref,'function reference')
+                if ref.casefold() not in ids:raise ValueError('unknown function reference')
+    if not isinstance(plan['leadership_intent'],dict):raise TypeError('leadership_intent')
+    unsupported=plan['unsupported_terms']
+    if not isinstance(unsupported,list):raise TypeError('unsupported_terms')
+    for item in unsupported:
+        if not isinstance(item,dict) or not {'term','reason'}<=set(item):raise ValueError('unsupported term')
+        _v2_nonempty(item['term'],'term');_v2_nonempty(item['reason'],'reason')
 def build_pool_profile_v1_from_v2(plan):
     import copy
+    _v2_validate_projection_structure(plan)
     if not isinstance(plan,dict) or not isinstance(plan.get('functional_core'),list) or not isinstance(plan.get('role_titles'),dict):raise TypeError('plan')
     functions={x['function_id']:x['normalized_function'] for x in plan['functional_core']};titles=[];reasons={};seen=set()
     for bucket in ('strong','conditional'):
         for item in plan['role_titles'][bucket]:
-            key=item['title'].casefold()
+            key=_v2_norm(item['title'])
             if key not in seen:
                 seen.add(key);titles.append(item['title']);reasons[item['title']]='; '.join(functions[x] for x in item['derived_from_functions'])
     result={'role_family':plan['vacancy_understanding']['role_family'],'target_functions':[x['normalized_function'] for x in plan['functional_core']],'accepted_role_titles':titles,'mandatory_search_concepts':[{'concept_id':x['function_id'],'alternatives':copy.deepcopy(x['search_terms'])} for x in plan['functional_core']],'domain_context':[],'preferred_concepts':[],'excluded_role_families':[],'excluded_titles':[],'leadership_intent':copy.deepcopy(plan['leadership_intent']),'rationale':{'role_family':plan['vacancy_understanding']['summary'],'accepted_role_titles':reasons,'excluded_titles':{}}}
