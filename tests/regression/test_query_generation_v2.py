@@ -90,6 +90,79 @@ def _replace_quoted_phrase_in_strategies(plan, old, new):
     if changed == 0:
         raise AssertionError(f"Quoted phrase not found: {old}")
 
+def _query_groups(plan, strategy_id):
+    strategy = next(item for item in plan["strategies"] if item["id"] == strategy_id)
+    groups, _ = nano._v2_parse(strategy["query"])
+    return groups
+
+def _make_english_only_plan():
+    import re
+    plan = copy.deepcopy(golden_plan())
+    has_cyrillic = lambda value: re.search(r"[А-Яа-яЁё]", value) is not None
+    for bucket in ("strong", "conditional"):
+        plan["role_titles"][bucket] = [item for item in plan["role_titles"][bucket] if not has_cyrillic(item["title"])]
+    by_id = {item["id"]: item for item in plan["strategies"]}
+    balanced_groups, _ = nano._v2_parse(by_id["balanced"]["query"])
+    by_id["balanced"]["query"] = '("Solution Architect" OR "Integration Architect") AND (' + ' OR '.join(f'"{value}"' for value in balanced_groups[1]) + ')'
+    precision_groups, precision_ands = nano._v2_parse(by_id["precision"]["query"])
+    precision_titles = [value for value in precision_groups[0] if not has_cyrillic(value)]
+    precision_parts = ['(' + ' OR '.join(f'"{value}"' for value in precision_titles) + ')'] + ['(' + ' OR '.join(f'"{value}"' for value in group) + ')' for group in precision_groups[1:]]
+    by_id["precision"]["query"] = ' AND '.join(precision_parts)
+    declared = [item["title"] for bucket in ("strong", "conditional") for item in plan["role_titles"][bucket]]
+    required = ["Solution Architect", "Integration Architect"]
+    recall = required + [value for value in declared if value not in required]
+    by_id["title_recall"]["query"] = '(' + ' OR '.join(f'"{value}"' for value in recall) + ')'
+    normalized = {nano._v2_norm(item["query"]) for item in plan["strategies"]}
+    assert len(normalized) == 4
+    groups, ands = nano._v2_parse(by_id["balanced"]["query"])
+    declared_titles = {nano._v2_norm(value) for value in declared}
+    declared_terms = {nano._v2_norm(term) for function in plan["functional_core"] for term in function["search_terms"]}
+    assert ands == 1 and {nano._v2_norm(value) for value in groups[0]} <= declared_titles
+    assert {nano._v2_norm(value) for value in groups[1]} <= declared_terms
+    assert plan["selected_strategy"] == "balanced"
+    assert not any(has_cyrillic(value) for value in declared)
+    assert not any(has_cyrillic(value) for value in groups[0])
+    return plan
+
+class QueryGenerationV2BilingualCoverageTests(unittest.TestCase):
+    def test_mixed_language_vacancy_rejects_english_only_balanced_titles(self):
+        import re
+        plan = _make_english_only_plan(); vacancy = copy.deepcopy(GOLDEN_VACANCY)
+        groups = _query_groups(plan, "balanced")
+        declared_titles = {nano._v2_norm(item["title"]) for bucket in plan["role_titles"].values() for item in bucket}
+        declared_terms = {nano._v2_norm(term) for function in plan["functional_core"] for term in function["search_terms"]}
+        self.assertRegex(vacancy["name"], r"[A-Za-z]"); self.assertRegex(vacancy["name"], r"[А-Яа-яЁё]")
+        self.assertTrue(any(re.search(r"[A-Za-z]", value) for value in groups[0])); self.assertFalse(any(re.search(r"[А-Яа-яЁё]", value) for value in groups[0]))
+        self.assertTrue({nano._v2_norm(value) for value in groups[0]} <= declared_titles)
+        self.assertTrue({nano._v2_norm(value) for value in groups[1]} <= declared_terms)
+        self.assertEqual({item["id"] for item in plan["strategies"]}, {"balanced", "precision", "title_recall", "functional_recall"})
+        self.assertEqual(plan["selected_strategy"], "balanced")
+        self.assertEqual(len({nano._v2_norm(item["query"]) for item in plan["strategies"]}), 4)
+        with self.assertRaises((ValueError, TypeError)):
+            nano.validate_vacancy_search_plan_v2(plan, vacancy)
+
+    def test_mixed_language_vacancy_accepts_bilingual_balanced_titles(self):
+        import re
+        plan = golden_plan(); vacancy = copy.deepcopy(GOLDEN_VACANCY); groups = _query_groups(plan, "balanced")
+        declared = {nano._v2_norm(item["title"]) for bucket in plan["role_titles"].values() for item in bucket}
+        latin = [value for value in groups[0] if re.search(r"[A-Za-z]", value)]; cyrillic = [value for value in groups[0] if re.search(r"[А-Яа-яЁё]", value)]
+        self.assertRegex(vacancy["name"], r"[A-Za-z]"); self.assertRegex(vacancy["name"], r"[А-Яа-яЁё]")
+        self.assertTrue(latin and cyrillic); self.assertIn(nano._v2_norm(latin[0]), declared); self.assertIn(nano._v2_norm(cyrillic[0]), declared)
+        self.assertEqual(nano.validate_vacancy_search_plan_v2(plan, vacancy)["schema_version"], 2)
+
+    def test_single_script_vacancy_does_not_require_bilingual_titles(self):
+        import re
+        plan = _make_english_only_plan(); vacancy = copy.deepcopy(GOLDEN_VACANCY); vacancy["name"] = "Solution Architect"
+        groups = _query_groups(plan, "balanced")
+        self.assertRegex(vacancy["name"], r"[A-Za-z]"); self.assertNotRegex(vacancy["name"], r"[А-Яа-яЁё]")
+        self.assertTrue(all(re.search(r"[A-Za-z]", value) and not re.search(r"[А-Яа-яЁё]", value) for value in groups[0]))
+        self.assertEqual(nano.validate_vacancy_search_plan_v2(plan, vacancy)["schema_version"], 2)
+
+    def test_query_system_documents_mixed_language_title_coverage(self):
+        prose = _normalized_prompt_text().split("QUERY_PLAN_SCHEMA_BEGIN".casefold(), 1)[0]
+        for phrase in ("mixed-language vacancy title", "cyrillic title", "latin title", "balanced title or-group", "role_titles", "hybrid vacancy title", "must not be copied automatically"):
+            self.assertIn(phrase, prose)
+
 class QueryGenerationV2ApiTests(unittest.TestCase):
     def test_future_validator_api_is_required(self): self.assertTrue(callable(require_api("validate_vacancy_search_plan_v2")))
     def test_future_strategy_validator_api_is_required(self): self.assertTrue(callable(require_api("validate_search_strategy_v2")))
