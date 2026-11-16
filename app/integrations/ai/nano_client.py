@@ -684,21 +684,14 @@ def build_pool_profile_v1_from_v2(plan):
     return result
 
 def generate_vacancy_search_plan(vacancy: dict) -> dict:
-    prepared = prepare_vacancy(vacancy)
-    prompt = "Сформируй Query Generation V2 JSON по вакансии: " + json.dumps(prepared, ensure_ascii=False, default=str)
-    raw = ask(prompt, QUERY_SYSTEM).strip()
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I | re.S).strip()
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict): raise TypeError("root")
-        validated_plan = validate_vacancy_search_plan_v2(parsed, prepared)
-        selected_strategy = next(x for x in validated_plan["strategies"] if x["id"] == validated_plan["selected_strategy"])
-        if selected_strategy["id"] != "balanced": raise ValueError("selected strategy")
-        compatibility_profile = build_pool_profile_v1_from_v2(validated_plan)
-        return {"plan": validated_plan, "query": selected_strategy["query"], "profile": compatibility_profile}
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("Query Generation V2 response rejected: validation failed")
-        raise AIUnavailableError("ИИ вернул некорректный план поиска. Требуется повторная генерация вручную.", request_sent=True) from exc
+    from app.integrations.ai import query_interpreter
+
+    result = query_interpreter.generate_vacancy_search_plan_v3(vacancy)
+    return {
+        "plan": result["plan"],
+        "query": result["query"],
+        "profile": result["profile"],
+    }
 
 
 def generate_resume_language_query(vacancy: dict) -> str:
