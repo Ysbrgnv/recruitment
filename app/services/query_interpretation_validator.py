@@ -46,6 +46,21 @@ def _evidence(value, label):
         _text(item, label)
 
 
+
+def _has_latin(value):
+    return isinstance(value, str) and re.search(r"[A-Za-z]", value) is not None
+
+
+def _has_cyrillic(value):
+    return isinstance(value, str) and re.search(r"[А-Яа-яЁё]", value) is not None
+
+
+def _is_mixed_language_vacancy(vacancy):
+    if not isinstance(vacancy, dict):
+        return False
+    name = vacancy.get("name")
+    return _has_latin(name) and _has_cyrillic(name)
+
 def validate_search_interpretation_v3(interpretation, vacancy):
     _exact(interpretation, V3_INTERPRETATION_FIELDS, "interpretation")
     version = interpretation["schema_version"]
@@ -64,6 +79,7 @@ def validate_search_interpretation_v3(interpretation, vacancy):
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise ValueError("confidence")
 
+    mixed_language = _is_mixed_language_vacancy(vacancy)
     functions = interpretation["functions"]
     if not isinstance(functions, list) or not functions:
         raise ValueError("functions")
@@ -97,6 +113,10 @@ def validate_search_interpretation_v3(interpretation, vacancy):
                 raise ValueError("market term language")
             if term["derivation"] not in ALLOWED_DERIVATIONS:
                 raise ValueError("market term derivation")
+        if mixed_language and function["importance"] == "primary":
+            languages = {term["language"] for term in terms}
+            if not {"en", "ru"}.issubset(languages):
+                raise ValueError("mixed-language primary market terms")
 
     primary_ids = {
         function["function_id"]
@@ -151,6 +171,11 @@ def validate_search_interpretation_v3(interpretation, vacancy):
             ):
                 raise ValueError("unknown function reference")
         _evidence(title["evidence"], "title evidence")
+
+    if mixed_language:
+        title_languages = {title["language"] for title in titles}
+        if not {"en", "ru"}.issubset(title_languages):
+            raise ValueError("mixed-language role title coverage")
 
     strong_titles = [
         title
