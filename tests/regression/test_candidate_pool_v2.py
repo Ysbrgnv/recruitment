@@ -36,6 +36,15 @@ def _v2_note(candidate):
             return note
     raise AssertionError('Candidate Pool V2 provenance note is missing')
 
+def _resume_inputs_snapshot(values):
+    result = {}
+    for key, value in values.items():
+        if isinstance(value, BaseException):
+            result[key] = {'kind': 'exception', 'type': type(value), 'args': copy.deepcopy(value.args)}
+        else:
+            result[key] = {'kind': 'resume', 'value': copy.deepcopy(value)}
+    return result
+
 def _call_pool(*, plan=None, search_pages=None, resumes=None, target_pool=20, existing_pool=None, checkpoint=None, profile=None, requirements=None, metrics=None, pool_exclusions=None, vacancy=None):
     search_pages = search_pages or {}
     resumes = resumes or {}
@@ -58,7 +67,7 @@ def _call_pool(*, plan=None, search_pages=None, resumes=None, target_pool=20, ex
     vacancy_before = copy.deepcopy(vacancy)
     requirements_before = copy.deepcopy(requirements)
     existing_pool_before = copy.deepcopy(existing_pool)
-    resumes_before = copy.deepcopy(resumes)
+    resumes_before = _resume_inputs_snapshot(resumes)
     with patch.object(settings, 'CANDIDATE_POOL_V2_ENABLED', True, create=True), patch.object(service, 'search_resumes', side_effect=search) as search_mock, patch.object(service, 'fetch_resume_details', side_effect=load) as fetch_mock, patch.object(service, 'was_sent_to_ai', return_value=False), patch.object(service, 'reset_history_cache'), patch('app.integrations.ai.nano_client.ask', side_effect=AssertionError('AI called')) as ask_mock, patch('app.integrations.ai.nano_client.evaluate_one_resume', side_effect=AssertionError('AI evaluation called')) as evaluate_mock, patch.object(workflow, 'send_candidate_email', side_effect=AssertionError('email called')) as candidate_email, patch.object(workflow, 'send_xray_email', side_effect=AssertionError('email called')) as xray_email, patch('requests.get', side_effect=AssertionError('network called')) as get_mock, patch('requests.post', side_effect=AssertionError('network called')) as post_mock:
         arguments = {'profile': profile or _profile(), 'pool_exclusions': pool_exclusions, 'existing_pool': existing_pool, 'checkpoint': checkpoint}
         if 'plan' in inspect.signature(service._search_candidate_pool).parameters:
@@ -74,7 +83,7 @@ def _call_pool(*, plan=None, search_pages=None, resumes=None, target_pool=20, ex
         raise AssertionError('production mutated requirements')
     if existing_pool != existing_pool_before:
         raise AssertionError('production mutated existing_pool')
-    if resumes != resumes_before:
+    if _resume_inputs_snapshot(resumes) != resumes_before:
         raise AssertionError('production mutated fetched resume')
     return (pool, metrics, pool_exclusions, search_mock, fetch_mock)
 
