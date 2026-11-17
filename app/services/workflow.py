@@ -107,7 +107,7 @@ def run_hh_steps(task_id,progress,staged=False):
     task=get_task(task_id);_migrate_saved_results(task)
     if ops.unknowns(task_id):pause(task_id)
     cp=task.get('checkpoint') or {};metrics={**_metrics(),**(cp.get('metrics') or {})}
-    profile=cp.get('vacancy_search_profile') or task.get('vacancy_search_profile');pool_exclusions=dict(cp.get('pool_exclusions') or {})
+    profile=cp.get('vacancy_search_profile') or task.get('vacancy_search_profile');plan=cp.get('vacancy_search_plan') or task.get('vacancy_search_plan');pool_exclusions=dict(cp.get('pool_exclusions') or {})
     vacancy=cp.get('vacancy') or service.fetch_vacancy_details(task['vacancy_id'])
     target=min(service.MAX_CANDIDATE_POOL,task['requested_count']*service.POOL_MULTIPLIER+service.POOL_EXTRA)
     deliverable=_sync_metrics(task_id,metrics);metrics['requested_count']=task['requested_count']
@@ -121,14 +121,14 @@ def run_hh_steps(task_id,progress,staged=False):
     if deliverable and staged:yield 'search'
     if not cp.get('pool_complete') and metrics['emails_sent']<task['requested_count']:
         def save_partial(partial_pool,partial_metrics,partial_exclusions):
-            partial_cp={'vacancy':vacancy,'vacancy_search_profile':profile,'pool':list(partial_pool),'pool_complete':False,'metrics':dict(partial_metrics),'pool_exclusions':dict(partial_exclusions)}
+            partial_cp={'vacancy':vacancy,'vacancy_search_profile':profile,'vacancy_search_plan':plan,'pool':list(partial_pool),'pool_complete':False,'metrics':dict(partial_metrics),'pool_exclusions':dict(partial_exclusions)}
             update_task(task_id,checkpoint=partial_cp,pool_ids=[x[0] for x in partial_pool])
-        pool=service._search_candidate_pool(task['vacancy_id'],vacancy,service.vacancy_requirements(vacancy),task['query'],target,task['requested_count'],metrics,progress,profile=profile,pool_exclusions=pool_exclusions,existing_pool=cp.get('pool') or [],checkpoint=save_partial)
+        pool=service._search_candidate_pool(task['vacancy_id'],vacancy,service.vacancy_requirements(vacancy),task['query'],target,task['requested_count'],metrics,progress,profile=profile,pool_exclusions=pool_exclusions,existing_pool=cp.get('pool') or [],checkpoint=save_partial,plan=plan)
         # Legacy explicitly allowed retries must not disappear when rebuilding the pool.
         for op in _task_ops(task_id):
             if op['kind']=='legacy_ai' and op['state']=='retry_allowed' and op['item_key'] not in [x[0] for x in pool]:
                 resume=service.fetch_resume_details(op['item_key']);pool.append((op['item_key'],resume,[]))
-        cp={'vacancy':vacancy,'vacancy_search_profile':profile,'pool':pool,'pool_complete':True,'metrics':metrics,'pool_exclusions':pool_exclusions}
+        cp={'vacancy':vacancy,'vacancy_search_profile':profile,'vacancy_search_plan':plan,'pool':pool,'pool_complete':True,'metrics':metrics,'pool_exclusions':pool_exclusions}
         update_task(task_id,checkpoint=cp,pool_ids=[x[0] for x in pool])
     pool=cp.get('pool',[])
     progress('pool_ready',f"Пул сформирован: {len(pool)} кандидатов. Оценка после формирования пула.",service._progress_payload(metrics,target,task['requested_count']))
@@ -222,4 +222,3 @@ def run_xray(task_id,progress):
     counts.update(counters)
     summary=f" Прочитано ссылок: {counts.get('links_read',0)}; распознано профилей: {counts.get('profiles_recognized',0)}; не профиль/неверный URL: {counts.get('invalid_links',0)+counters['pool_invalid']}; невыбранная площадка: {counts.get('unselected_links',0)}; исключено историей: {counters['history_excluded']}; дубли: {counts.get('search_duplicates',0)+counters['pool_duplicates']}."
     return {'mode':'xray','requested_count':n,'profiles':profiles,'query':task['query'],'metrics':{'pool':len(profiles),'shortfall':shortfall,'ai_requested':0,'emails_sent':int(status=='Sent'),**counts},'message':f'Найдено {len(profiles)} из {n}. Статус письма: {status}.'+(' Недостаточно новых профилей в доступной выдаче.' if shortfall else '')+summary,'mail_status':status,'evaluated':[],'manual_review':[]}
-

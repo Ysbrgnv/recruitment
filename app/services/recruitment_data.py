@@ -304,3 +304,119 @@ def classify_candidate_level(current_role):
     if any(re.search(pattern, title_fold, re.I) for pattern in _AMBIGUOUS_LEVEL_PATTERNS):
         return {"level": "unknown", "evidence": [f"Неоднозначный уровень роли: {title}"]}
     return {"level": "individual_contributor", "evidence": [f"Текущая или последняя роль без подтвержденного управления: {title}"]}
+
+
+def _pool_v2_selected_role(resume):
+    current_role = select_current_or_latest_experience(resume)
+    if current_role.get("status") in {"current", "latest"}:
+        return current_role
+    return None
+
+
+def _pool_v2_title_level(title):
+    normalized = clean_html(title).casefold()
+    if re.search(r"(?<!\w)technical\s+lead(?!\w)", normalized, re.I):
+        return "technical_lead", False
+    if re.search(
+        r"(?<!\w)(?:lead|head|team\s+lead|lead\s+developer|ведущий|"
+        r"project\s+manager|product\s+owner|руководитель\s+проекта)(?!\w)",
+        normalized,
+        re.I,
+    ):
+        return "unknown", True
+    if normalized:
+        return "individual_contributor", False
+    return "unknown", True
+
+
+def assess_candidate_leadership_v2(resume):
+    current_role = _pool_v2_selected_role(resume)
+    if current_role is None:
+        level, review_hint = _pool_v2_title_level(resume.get("title"))
+        return {
+            "level": level,
+            "confidence": 0.20,
+            "evidence_categories": [],
+            "evidence": [],
+            "review_hint": review_hint,
+        }
+
+    title = current_role.get("title")
+    responsibilities = clean_html(current_role.get("responsibilities")).casefold()
+    sentences = [
+        part.strip()
+        for part in re.split(r"[.!?;\n]+", responsibilities)
+        if part.strip()
+    ]
+    category_patterns = (
+        ("direct_reports", (r"(?<!\w)\d+\s+direct\s+reports?(?!\w)",)),
+        ("explicit_team_size", (
+            r"(?<!\w)managed\s+a\s+team\s+of\s+\d+(?!\w)",
+            r"(?<!\w)team\s+size\s*:\s*\d+\s+employees?(?!\w)",
+            r"(?<!\w)управлял\s+командой\s+из\s+\d+\s+человек(?!\w)",
+        )),
+        ("hiring_or_dismissal", (
+            r"(?<!\w)hiring\s+and\s+dismissal\s+decisions?(?!\w)",
+            r"(?<!\w)найм\w*\s+и\s+увольнен\w*(?!\w)",
+        )),
+        ("performance_review", (
+            r"(?<!\w)(?:conducted\s+)?annual\s+performance\s+reviews?(?!\w)",
+            r"(?<!\w)performance\s+review(?:s)?(?!\w)",
+            r"(?<!\w)оценк\w*\s+эффективност\w*\s+сотрудник\w*(?!\w)",
+        )),
+        ("headcount_responsibility", (
+            r"(?<!\w)headcount\s+responsibilit(?:y|ies)(?!\w)",
+            r"(?<!\w)ответственн\w*\s+за\s+штатн\w*\s+численност\w*(?!\w)",
+        )),
+        ("department_management", (
+            r"(?<!\w)(?:managed|headed)\s+(?:a\s+)?department(?!\w)",
+            r"(?<!\w)руковод\w*\s+(?:отделом|департаментом|управлением)(?!\w)",
+        )),
+        ("personnel_budget_responsibility", (
+            r"(?<!\w)personnel\s+budget\s+responsibilit(?:y|ies)(?!\w)",
+            r"(?<!\w)бюджет\w*\s+на\s+персонал(?!\w)",
+        )),
+    )
+    categories = []
+    evidence = []
+    used_sentences = set()
+    for category, patterns in category_patterns:
+        for index, sentence in enumerate(sentences):
+            if index in used_sentences:
+                continue
+            match = None
+            for pattern in patterns:
+                match = re.search(pattern, sentence, re.I)
+                if match:
+                    break
+            if match:
+                categories.append(category)
+                evidence.append(match.group(0))
+                used_sentences.add(index)
+                break
+
+    count = len(categories)
+    if count >= 3:
+        return {
+            "level": "people_manager",
+            "confidence": 0.90,
+            "evidence_categories": categories,
+            "evidence": evidence,
+            "review_hint": False,
+        }
+    if count == 2:
+        return {
+            "level": "people_manager",
+            "confidence": 0.80,
+            "evidence_categories": categories,
+            "evidence": evidence,
+            "review_hint": False,
+        }
+    level, title_review_hint = _pool_v2_title_level(title)
+    return {
+        "level": level,
+        "confidence": 0.40 if count else 0.20,
+        "evidence_categories": categories,
+        "evidence": evidence,
+        "review_hint": title_review_hint or bool(count),
+    }

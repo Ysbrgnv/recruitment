@@ -1,12 +1,14 @@
 import logging
 import re
 import time
+import copy
 
 from app.persistence.app_state import set_review, get_task, update_task
 from app.core.errors import AIUnavailableError, HHUnavailableError
+from app.core import settings
 from app.integrations.hh.hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
 from app.integrations.ai.nano_client import evaluate_one_resume, evaluation_to_text, generate_vacancy_search_plan, generate_xray_query
-from app.services.recruitment_data import (classify_candidate_level, resume_filter_result, select_current_or_latest_experience, vacancy_requirements)
+from app.services.recruitment_data import (assess_candidate_leadership_v2, classify_candidate_level, resume_filter_result, select_current_or_latest_experience, vacancy_requirements)
 from app.core.settings import (
     MAX_CANDIDATE_POOL, POOL_EXTRA, POOL_MULTIPLIER,
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
@@ -263,7 +265,7 @@ def _build_candidate_result(vacancy, resume, number, notes):
     }
 
 
-def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None):
+def _search_candidate_pool_v1(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None):
     reset_history_cache()
     candidates = list(existing_pool or [])
     pool_exclusions = pool_exclusions if isinstance(pool_exclusions,dict) else {}
@@ -336,6 +338,250 @@ def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool
             break
     return candidates
 
+
+
+POOL_V2_STRATEGY_ORDER = (
+    "balanced",
+    "title_recall",
+    "functional_recall",
+    "precision",
+)
+
+
+def _pool_v2_note(notes):
+    for note in notes:
+        if isinstance(note, dict) and note.get("pool_version") == 2:
+            return note
+    note = {
+        "pool_version": 2,
+        "matched_strategies": [],
+        "strategy_matches": [],
+        "signals": {},
+        "leadership": {},
+    }
+    notes.append(note)
+    return note
+
+
+def _pool_v2_add_match(note, strategy_id, page, rank):
+    if strategy_id not in note["matched_strategies"]:
+        note["matched_strategies"].append(strategy_id)
+        note["matched_strategies"].sort(key=POOL_V2_STRATEGY_ORDER.index)
+    match = {"strategy_id": strategy_id, "page": page, "rank": rank}
+    if match not in note["strategy_matches"]:
+        note["strategy_matches"].append(match)
+
+
+def _pool_v2_signals(resume, requirements):
+    area = str((resume.get("area") or {}).get("id") or "")
+    target_area = str(requirements.get("area_id") or "")
+    months = (resume.get("total_experience") or {}).get("months")
+    minimum = requirements.get("minimum_experience_months")
+    return {
+        "city": "unknown" if not area or not target_area else "match" if area == target_area else "mismatch",
+        "experience": "unknown" if months is None or minimum is None else "match" if months >= minimum else "below_requested",
+        "role_title": "unknown",
+        "professional": "mismatch_or_unknown",
+    }
+
+
+def _pool_v2_strategies(plan):
+    first = {}
+    for strategy in plan.get("strategies") or []:
+        if isinstance(strategy, dict) and strategy.get("id") not in first:
+            first[strategy.get("id")] = strategy
+    result = []
+    for strategy_id in POOL_V2_STRATEGY_ORDER:
+        strategy = first.get(strategy_id)
+        if not strategy:
+            continue
+        normal = strategy.get("executable_now") is True and strategy.get("blocked_by") is None
+        legacy = (
+            strategy_id == "functional_recall"
+            and strategy.get("executable_now") is False
+            and strategy.get("blocked_by") == "pool_v1_requires_leading_title_group"
+        )
+        query = strategy.get("query")
+        if (normal or legacy) and isinstance(query, str) and query.strip():
+            result.append((strategy_id, query))
+    return result
+
+
+def _search_candidate_pool_v2(vacancy_id, vacancy, requirements, target_pool, requested_count, metrics, progress, profile, pool_exclusions, existing_pool, checkpoint, plan):
+    reset_history_cache()
+    candidates = copy.deepcopy(list(existing_pool or []))
+    pool_exclusions = pool_exclusions if isinstance(pool_exclusions, dict) else {}
+    candidate_index = {
+        str(candidate[0]): index
+        for index, candidate in enumerate(candidates)
+        if candidate
+    }
+    attempted_resume_ids = set(candidate_index)
+    state = metrics.setdefault("pool_v2", {})
+    state.setdefault("strategy_order", list(POOL_V2_STRATEGY_ORDER))
+    state.setdefault("completed_strategies", [])
+    state.setdefault("current_strategy", None)
+    state.setdefault("next_page_by_strategy", {})
+    state.setdefault("matched_strategy_counts", {})
+    completed = state["completed_strategies"]
+    scan_budget = SEARCH_SCAN_LIMIT
+    vacancy_level = (
+        ((profile or {}).get("leadership_intent") or {}).get(
+            "level",
+            "unknown",
+        )
+    )
+
+    for strategy_id, strategy_query in _pool_v2_strategies(plan):
+        if strategy_id in completed:
+            continue
+        if len(candidates) >= target_pool or metrics.get("scanned", 0) >= scan_budget:
+            break
+        state["current_strategy"] = strategy_id
+        page = int(state["next_page_by_strategy"].get(strategy_id, 0))
+        state["next_page_by_strategy"].setdefault(strategy_id, page)
+        strategy_completed = False
+        strategy_stopped_by_limit = False
+
+        while page < SEARCH_MAX_PAGES:
+            if len(candidates) >= target_pool or metrics.get("scanned", 0) >= scan_budget:
+                strategy_stopped_by_limit = True
+                break
+            params = {
+                "text": strategy_query,
+                "per_page": SEARCH_PER_PAGE,
+                "page": page,
+            }
+            if requirements.get("area_id"):
+                params["area"] = requirements["area_id"]
+            data = search_resumes(params)
+            items = data.get("items", [])
+            pages = data.get("pages", 0)
+            metrics["search_items"] = metrics.get("search_items", 0) + len(items)
+            progress(
+                "search",
+                f"Поиск HH: {strategy_id}, страница {page + 1}",
+                _progress_payload(metrics, target_pool, requested_count),
+            )
+            page_complete = True
+            for rank, item in enumerate(items, start=1):
+                if len(candidates) >= target_pool or metrics.get("scanned", 0) >= scan_budget:
+                    page_complete = False
+                    strategy_stopped_by_limit = True
+                    break
+                resume_id = str(item.get("id") or "")
+                if not resume_id:
+                    continue
+                if resume_id in candidate_index:
+                    index = candidate_index[resume_id]
+                    _, _, notes = candidates[index]
+                    note = _pool_v2_note(notes)
+                    before = len(note["strategy_matches"])
+                    _pool_v2_add_match(note, strategy_id, page, rank)
+                    if len(note["strategy_matches"]) != before:
+                        state["matched_strategy_counts"][strategy_id] = (
+                            state["matched_strategy_counts"].get(strategy_id, 0) + 1
+                        )
+                        if checkpoint:
+                            checkpoint(candidates, metrics, pool_exclusions)
+                    continue
+                if resume_id in attempted_resume_ids:
+                    continue
+                if was_sent_to_ai(resume_id, vacancy_id):
+                    attempted_resume_ids.add(resume_id)
+                    metrics["already_sent"] = metrics.get("already_sent", 0) + 1
+                    continue
+                metrics["scanned"] = metrics.get("scanned", 0) + 1
+                attempted_resume_ids.add(resume_id)
+                try:
+                    loaded = fetch_resume_details(resume_id)
+                except HHUnavailableError:
+                    raise
+                except Exception:
+                    metrics["load_failed"] = metrics.get("load_failed", 0) + 1
+                    logger.exception("Не удалось загрузить резюме %s", resume_id)
+                    continue
+                if not isinstance(loaded, dict) or not loaded:
+                    metrics["load_failed"] = metrics.get("load_failed", 0) + 1
+                    continue
+                resume = copy.deepcopy(loaded)
+                if was_sent_to_ai(resume_id, vacancy_id):
+                    metrics["already_sent"] = metrics.get("already_sent", 0) + 1
+                    continue
+                leadership = assess_candidate_leadership_v2(resume)
+                if (
+                    vacancy_level == "individual_contributor"
+                    and leadership["level"] == "people_manager"
+                    and len(set(leadership["evidence_categories"])) >= 2
+                    and leadership["confidence"] >= 0.80
+                ):
+                    metrics["excluded_leadership_mismatch"] = (
+                        metrics.get("excluded_leadership_mismatch", 0) + 1
+                    )
+                    pool_exclusions[resume_id] = {
+                        "reason": "leadership_mismatch",
+                        "vacancy_level": "individual_contributor",
+                        "candidate_level": "people_manager",
+                        "confidence": leadership["confidence"],
+                        "evidence_categories": list(
+                            leadership["evidence_categories"]
+                        ),
+                        "evidence": list(leadership["evidence"]),
+                    }
+                    if checkpoint:
+                        checkpoint(candidates, metrics, pool_exclusions)
+                    continue
+                notes = []
+                note = _pool_v2_note(notes)
+                _pool_v2_add_match(note, strategy_id, page, rank)
+                note["signals"] = _pool_v2_signals(resume, requirements)
+                note["leadership"] = copy.deepcopy(leadership)
+                candidates.append((resume_id, resume, notes))
+                candidate_index[resume_id] = len(candidates) - 1
+                state["matched_strategy_counts"][strategy_id] = (
+                    state["matched_strategy_counts"].get(strategy_id, 0) + 1
+                )
+                metrics["pool"] = len(candidates)
+                if leadership["level"] == "unknown":
+                    metrics["level_unknown_kept"] = (
+                        metrics.get("level_unknown_kept", 0) + 1
+                    )
+                if checkpoint:
+                    checkpoint(candidates, metrics, pool_exclusions)
+                progress(
+                    "history",
+                    f"Формируется пул: {len(candidates)} из {target_pool}",
+                    _progress_payload(metrics, target_pool, requested_count),
+                )
+            if not page_complete:
+                break
+            page += 1
+            state["next_page_by_strategy"][strategy_id] = page
+            if checkpoint:
+                checkpoint(candidates, metrics, pool_exclusions)
+            if page >= pages:
+                strategy_completed = True
+                break
+
+        if strategy_completed:
+            if strategy_id not in completed:
+                completed.append(strategy_id)
+            state["current_strategy"] = None
+            if checkpoint:
+                checkpoint(candidates, metrics, pool_exclusions)
+        elif strategy_stopped_by_limit:
+            state["current_strategy"] = strategy_id
+            if checkpoint:
+                checkpoint(candidates, metrics, pool_exclusions)
+
+    metrics["pool"] = len(candidates)
+    return candidates
+
+
+def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
+    if settings.CANDIDATE_POOL_V2_ENABLED and isinstance(plan, dict) and isinstance(plan.get("strategies"), list):
+        return _search_candidate_pool_v2(vacancy_id, vacancy, requirements, target_pool, requested_count, metrics, progress, profile, pool_exclusions, existing_pool, checkpoint, plan)
+    return _search_candidate_pool_v1(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile, pool_exclusions, existing_pool, checkpoint)
 
 def find_and_evaluate(vacancy_id, requested_count, responsible_email, task_id, progress=lambda *_: None, approved_query=None):
     """Compatibility entry point. All HH processing uses workflow.run_hh."""
