@@ -301,18 +301,39 @@ class CandidatePoolV2FailureCheckpointAndBoundsTests(unittest.TestCase):
 
     def test_checkpoint_receives_strategy_progress_and_resume_skips_completed_work(self):
         snapshots = []
-        checkpoint = lambda candidates, metrics, exclusions: snapshots.append(copy.deepcopy(metrics))
-        pages = {('"balanced"', 0): {'items': [{'id': 'r1', 'area': {'id': '1'}}], 'pages': 1}}
-        plan = _plan([_strategy('balanced', '"balanced"'), _strategy('title_recall', '"titles"')])
-        pool, metrics, _, _, _ = _call_pool(plan=plan, search_pages=pages, resumes={'r1': _resume()}, checkpoint=checkpoint)
+
+        def checkpoint(candidates, metrics, exclusions):
+            snapshots.append(copy.deepcopy(metrics))
+        first_plan = _plan([_strategy('balanced', '"balanced"')])
+        first_pages = {('"balanced"', 0): {'items': [{'id': 'r1', 'area': {'id': '1'}}], 'pages': 1}}
+        first_plan_before = copy.deepcopy(first_plan)
+        pool, metrics, _, _, _ = _call_pool(plan=first_plan, search_pages=first_pages, resumes={'r1': _resume()}, checkpoint=checkpoint)
+        self.assertEqual([candidate[0] for candidate in pool], ['r1'])
         self.assertTrue(snapshots)
         state = snapshots[-1]['pool_v2']
         self.assertEqual(state['strategy_order'], STRATEGY_ORDER)
         self.assertIn('balanced', state['completed_strategies'])
         self.assertIn('next_page_by_strategy', state)
-        resumed_metrics = copy.deepcopy(metrics)
+        self.assertEqual(_v2_note(pool[0])['matched_strategies'], ['balanced'])
+        self.assertEqual(first_plan, first_plan_before)
+        resumed_plan = _plan([_strategy('balanced', '"balanced"'), _strategy('title_recall', '"titles"')])
         resumed_pages = {('"titles"', 0): {'items': [{'id': 'r1', 'area': {'id': '1'}}], 'pages': 1}}
-        resumed, _, _, search, fetch = _call_pool(plan=plan, search_pages=resumed_pages, resumes={'r1': _resume()}, existing_pool=pool, metrics=resumed_metrics)
-        self.assertNotIn('"balanced"', [call.args[0]['text'] for call in search.call_args_list])
+        resumed_plan_before = copy.deepcopy(resumed_plan)
+        existing_pool_before = copy.deepcopy(pool)
+        resumed_metrics = copy.deepcopy(metrics)
+        resumed_metrics_before = copy.deepcopy(resumed_metrics)
+        self.assertEqual(resumed_metrics, resumed_metrics_before)
+        resumed, _, _, search, fetch = _call_pool(plan=resumed_plan, search_pages=resumed_pages, resumes={'r1': _resume()}, existing_pool=pool, metrics=resumed_metrics)
+        searched_queries = [call.args[0]['text'] for call in search.call_args_list]
+        self.assertEqual(searched_queries, ['"titles"'])
         fetch.assert_not_called()
-        self.assertIn('title_recall', _v2_note(resumed[0])['matched_strategies'])
+        self.assertEqual([candidate[0] for candidate in resumed], ['r1'])
+        provenance = _v2_note(resumed[0])
+        self.assertEqual(provenance['matched_strategies'], ['balanced', 'title_recall'])
+        strategy_matches = provenance['strategy_matches']
+        self.assertEqual(sum((item['strategy_id'] == 'balanced' for item in strategy_matches)), 1)
+        self.assertEqual(sum((item['strategy_id'] == 'title_recall' for item in strategy_matches)), 1)
+        self.assertEqual(first_plan, first_plan_before)
+        self.assertEqual(resumed_plan, resumed_plan_before)
+        self.assertEqual(pool, existing_pool_before)
+        self.assertIsNot(resumed, pool)
