@@ -4,7 +4,7 @@ import time
 import copy
 
 from app.persistence.app_state import set_review, get_task, update_task
-from app.core.errors import AIUnavailableError, HHUnavailableError
+from app.core.errors import AIUnavailableError, HHUnavailableError, UserFacingError
 from app.core import settings
 from app.integrations.hh.hh_client import fetch_resume_details, fetch_vacancy_details, search_resumes
 from app.integrations.ai.nano_client import evaluate_one_resume, evaluation_to_text, generate_vacancy_search_plan, generate_xray_query
@@ -578,7 +578,62 @@ def _search_candidate_pool_v2(vacancy_id, vacancy, requirements, target_pool, re
     return candidates
 
 
+def _select_candidate_pool_version(checkpoint):
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    explicit = checkpoint.get("pool_version")
+    if explicit in (1, 2, 3) and not isinstance(explicit, bool):
+        return {"pool_version": explicit}
+    if not checkpoint:
+        if settings.CANDIDATE_POOL_V3_ENABLED:
+            return {"pool_version": 3}
+        if settings.CANDIDATE_POOL_V2_ENABLED:
+            return {"pool_version": 2}
+        return {"pool_version": 1}
+
+    metrics = checkpoint.get("metrics")
+    has_v2_metrics = isinstance(metrics, dict) and isinstance(metrics.get("pool_v2"), dict)
+    has_v2_note = any(
+        isinstance(candidate, (list, tuple))
+        and len(candidate) >= 3
+        and any(isinstance(note, dict) and note.get("pool_version") == 2 for note in (candidate[2] or []))
+        for candidate in (checkpoint.get("pool") or [])
+    )
+    has_complete_v2 = has_v2_metrics and has_v2_note
+    has_partial_v2 = has_v2_metrics != has_v2_note
+    has_v3 = "page_snapshot" in checkpoint or "scanned_new_candidates" in checkpoint
+    v1_keys = {"vacancy", "pool", "pool_complete", "metrics", "pool_exclusions"}
+    has_v1 = v1_keys.issubset(checkpoint)
+
+    if has_partial_v2:
+        return {
+            "resolution": "manual_resolution",
+            "reason": "unknown_legacy_pool_version",
+        }
+    if has_complete_v2 and not has_v3:
+        return {"pool_version": 2}
+    if has_v1 and not has_complete_v2 and not has_v3:
+        return {"pool_version": 1}
+    return {
+        "resolution": "manual_resolution",
+        "reason": "unknown_legacy_pool_version",
+    }
+
+def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
+    reset_history_cache()
+    params = {"text": query, "per_page": SEARCH_PER_PAGE, "page": 0}
+    search_resumes(params)
+    return {
+        "pool": [],
+        "pool_complete": False,
+        "stop_reason": "system_error",
+        "implementation_state": "green1_stub",
+    }
+
 def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
+    if settings.CANDIDATE_POOL_V3_ENABLED:
+        raise UserFacingError(
+            "Candidate Pool V3 выбран, но production execution routing ещё не разрешён."
+        )
     if settings.CANDIDATE_POOL_V2_ENABLED and isinstance(plan, dict) and isinstance(plan.get("strategies"), list):
         return _search_candidate_pool_v2(vacancy_id, vacancy, requirements, target_pool, requested_count, metrics, progress, profile, pool_exclusions, existing_pool, checkpoint, plan)
     return _search_candidate_pool_v1(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile, pool_exclusions, existing_pool, checkpoint)

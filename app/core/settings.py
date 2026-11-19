@@ -17,6 +17,14 @@ def env_int(name: str, default: int, minimum: int = 0, maximum: int | None = Non
     value = max(minimum, value)
     return min(maximum, value) if maximum is not None else value
 
+def env_float(name: str, default: float, minimum: float = 0.0, maximum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    value = max(minimum, value)
+    return min(maximum, value) if maximum is not None else value
+
 HH_API_BASE = "https://api.hh.kz"
 HH_AUTHORIZE_URL = "https://hh.kz/oauth/authorize"
 HH_TOKEN_URL = "https://hh.kz/oauth/token"
@@ -43,6 +51,24 @@ CANDIDATE_POOL_V2_ENABLED = (
     .casefold()
     in {"1", "true", "yes", "on"}
 )
+CANDIDATE_POOL_V3_ENABLED = (
+    os.getenv("CANDIDATE_POOL_V3_ENABLED", "false").strip().casefold()
+    in {"1", "true", "yes", "on"}
+)
+CANDIDATE_POOL_V3_EXPERIENCE_FILTER_ENABLED = (
+    os.getenv("CANDIDATE_POOL_V3_EXPERIENCE_FILTER_ENABLED", "false").strip().casefold()
+    in {"1", "true", "yes", "on"}
+)
+CANDIDATE_POOL_V3_MAX_PAGES = env_int("CANDIDATE_POOL_V3_MAX_PAGES", 10, 1)
+CANDIDATE_POOL_V3_SCAN_LIMIT = env_int("CANDIDATE_POOL_V3_SCAN_LIMIT", 100, 1)
+CANDIDATE_POOL_V3_EXPERIENCE_TOLERANCE_MONTHS = env_int("CANDIDATE_POOL_V3_EXPERIENCE_TOLERANCE_MONTHS", 2, 0)
+CANDIDATE_POOL_V3_PAGE_SNAPSHOT_TTL_HOURS = env_int("CANDIDATE_POOL_V3_PAGE_SNAPSHOT_TTL_HOURS", 24, 1)
+CANDIDATE_POOL_V3_RECOVERY_SUCCESS_THRESHOLD = env_int("CANDIDATE_POOL_V3_RECOVERY_SUCCESS_THRESHOLD", 10, 1)
+CANDIDATE_POOL_V3_FAILURE_MIN_SAMPLE = env_int("CANDIDATE_POOL_V3_FAILURE_MIN_SAMPLE", 10, 1)
+CANDIDATE_POOL_V3_FAILURE_WINDOW = env_int("CANDIDATE_POOL_V3_FAILURE_WINDOW", 20, 1)
+CANDIDATE_POOL_V3_FAILURE_RATE_THRESHOLD = env_float("CANDIDATE_POOL_V3_FAILURE_RATE_THRESHOLD", 0.50, 0.0, 1.0)
+CANDIDATE_POOL_V3_CONSECUTIVE_FAILURE_LIMIT = env_int("CANDIDATE_POOL_V3_CONSECUTIVE_FAILURE_LIMIT", 5, 1)
+HH_MAX_RETRY_AFTER_SECONDS = env_int("HH_MAX_RETRY_AFTER_SECONDS", 30, 1)
 APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = env_int("APP_PORT", 8765, 1, 65535)
 REQUEST_TIMEOUT = 30

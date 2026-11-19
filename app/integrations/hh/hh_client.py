@@ -191,44 +191,105 @@ def recover_auth(rejected_token,generation):
 
 def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retries: int = 3):
     url = endpoint if endpoint.startswith("http") else f"{HH_API_BASE}/{endpoint.lstrip('/')}"
+    max_transient_requests = max(1, int(retries) + 1)
+    transient_count = 0
+    auth_recovery_used = not reauth
+
     with AUTH_LOCK:
-        with token_file_lock(ENV_PATH):reload_saved_tokens()
-        token=os.getenv('HH_BEARER','').strip()
-        generation=_AUTH_GENERATION
-    # Do not mutate a shared requests.Session while other threads are sending.
-    headers={"User-Agent":HH_USER_AGENT,"Accept":"application/json"}
-    if token:headers['Authorization']='Bearer '+token
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=(10, REQUEST_TIMEOUT))
-    except (requests.ConnectionError, requests.Timeout) as exc:
-        if retries <= 0:
-            raise HHUnavailableError("HH временно недоступен. Повторите попытку позже.") from exc
-        logger.warning("Сетевая ошибка HH (%s), повтор через 2с, осталось %s", exc, retries)
-        time.sleep(2)
-        return hh_get(endpoint, params, reauth, retries - 1)
-    if response.status_code == 429 and retries > 0:
-        try: wait = max(1, int(response.headers.get("Retry-After", "5")))
-        except ValueError: wait = 5
-        time.sleep(wait); return hh_get(endpoint, params, reauth, retries - 1)
-    if response.status_code in (401,403):
-        try:payload=response.json()
-        except ValueError:payload={}
-        entries=payload.get('errors',[]) if isinstance(payload,dict) else []
-        if not isinstance(entries,list):entries=[]
-        oauth={e.get('value') for e in entries if isinstance(e,dict) and e.get('type')=='oauth' and isinstance(e.get('value'),str)}
-        if oauth & {'token_revoked','application_not_found'}:
-            raise HHUnavailableError('HH: доступ отозван или приложение удалено. Требуется новая авторизация; внесите новую пару токенов в .env и запустите START_LOCAL.ps1.')
-        if reauth and (response.status_code==401 or 'token_expired' in oauth):
-            if recover_auth(token,generation):return hh_get(endpoint,params,False,retries)
-            raise HHUnavailableError(_AUTH_FAILURE_MESSAGE or _auth_message('unclassified'))
-        if response.status_code==403:
-            raise HHUnavailableError('HH вернул HTTP 403: проверьте права аккаунта, оплаченный доступ к методу и тип авторизации. Refresh не выполнялся: истечение токена не подтверждено.')
-        raise HHUnavailableError('HH отклонил обновлённый access-токен. Проверьте авторизацию; повторный refresh в этом запросе заблокирован.')
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        raise HHUnavailableError(f"HH вернул HTTP {response.status_code}.") from exc
-    return response
+        with token_file_lock(ENV_PATH):
+            reload_saved_tokens()
+        token = os.getenv("HH_BEARER", "").strip()
+        generation = _AUTH_GENERATION
+
+    while True:
+        headers = {"User-Agent": HH_USER_AGENT, "Accept": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        try:
+            response = requests.get(
+                url, params=params, headers=headers, timeout=(10, REQUEST_TIMEOUT)
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            transient_count += 1
+            if transient_count >= max_transient_requests:
+                raise HHUnavailableError(
+                    "HH временно недоступен. Повторите попытку позже."
+                ) from exc
+            delay = 2 ** transient_count
+            logger.warning(
+                "Сетевая ошибка HH (%s), повтор через %sс, transient attempt %s/%s",
+                exc, delay, transient_count, max_transient_requests,
+            )
+            time.sleep(delay)
+            continue
+
+        if response.status_code in (429, 500, 502, 503, 504):
+            transient_count += 1
+            if transient_count >= max_transient_requests:
+                raise HHUnavailableError(
+                    f"HH временно недоступен: HTTP {response.status_code}."
+                )
+            delay = 2 ** transient_count
+            retry_after = response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    delay = min(
+                        max(0, int(retry_after)), HH_MAX_RETRY_AFTER_SECONDS
+                    )
+                except (TypeError, ValueError):
+                    pass
+            time.sleep(delay)
+            continue
+
+        if response.status_code in (401, 403):
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            entries = payload.get("errors", []) if isinstance(payload, dict) else []
+            if not isinstance(entries, list):
+                entries = []
+            oauth = {
+                entry.get("value")
+                for entry in entries
+                if isinstance(entry, dict)
+                and entry.get("type") == "oauth"
+                and isinstance(entry.get("value"), str)
+            }
+            if oauth & {"token_revoked", "application_not_found"}:
+                raise HHUnavailableError(
+                    "HH: доступ отозван или приложение удалено. Требуется новая авторизация; "
+                    "внесите новую пару токенов в .env и запустите START_LOCAL.ps1."
+                )
+            recoverable = response.status_code == 401 or "token_expired" in oauth
+            if recoverable and not auth_recovery_used:
+                auth_recovery_used = True
+                if recover_auth(token, generation):
+                    with AUTH_LOCK:
+                        token = os.getenv("HH_BEARER", "").strip()
+                        generation = _AUTH_GENERATION
+                    continue
+                raise HHUnavailableError(
+                    _AUTH_FAILURE_MESSAGE or _auth_message("unclassified")
+                )
+            if response.status_code == 403:
+                raise HHUnavailableError(
+                    "HH вернул HTTP 403: проверьте права аккаунта, оплаченный доступ "
+                    "к методу и тип авторизации. Refresh не выполнялся: истечение "
+                    "токена не подтверждено."
+                )
+            raise HHUnavailableError(
+                "HH отклонил обновлённый access-токен. Проверьте авторизацию; "
+                "повторный refresh в этом запросе заблокирован."
+            )
+
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise HHUnavailableError(
+                f"HH вернул HTTP {response.status_code}."
+            ) from exc
+        return response
 
 def fetch_active_vacancies(employer_id: str) -> list[dict]:
     result, page = [], 0
@@ -249,4 +310,3 @@ def fetch_vacancy_details(vacancy_id: str) -> dict:
 
 def search_resumes(params: dict) -> dict: return hh_get("/resumes", params).json()
 def fetch_resume_details(resume_id: str) -> dict: return hh_get(f"/resumes/{resume_id}").json()
-
