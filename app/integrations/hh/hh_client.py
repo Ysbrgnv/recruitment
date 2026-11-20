@@ -109,7 +109,7 @@ def refresh_access_token() -> bool:
     # Persist intent BEFORE POST. No blind retry of a refresh with unknown outcome.
     _write_refresh_state('refresh_outcome_unknown')
     try:
-        response=requests.post(HH_TOKEN_URL,data={'grant_type':'refresh_token','refresh_token':refresh,'client_id':HH_CLIENT_ID,'client_secret':HH_CLIENT_SECRET},headers={'User-Agent':HH_USER_AGENT},timeout=(10,REQUEST_TIMEOUT),allow_redirects=False)
+        response=requests.post(HH_TOKEN_URL,data={'grant_type':'refresh_token','refresh_token':refresh,'client_id':HH_CLIENT_ID,'client_secret':HH_CLIENT_SECRET},headers={'User-Agent':HH_USER_AGENT},timeout=(HH_CONNECT_TIMEOUT_SECONDS,REQUEST_TIMEOUT),allow_redirects=False)
         if response.status_code!=200:
             try:payload=response.json()
             except ValueError:payload={}
@@ -153,7 +153,7 @@ def authorize_from_scratch() -> bool:
     code = input("Введите code из адресной строки HH: ").strip()
     if not code: return False
     try:
-        response = requests.post(HH_TOKEN_URL, data={"grant_type":"authorization_code", "code":code, "client_id":HH_CLIENT_ID, "client_secret":HH_CLIENT_SECRET, "redirect_uri":HH_REDIRECT_URI}, timeout=(10, REQUEST_TIMEOUT))
+        response = requests.post(HH_TOKEN_URL, data={"grant_type":"authorization_code", "code":code, "client_id":HH_CLIENT_ID, "client_secret":HH_CLIENT_SECRET, "redirect_uri":HH_REDIRECT_URI}, timeout=(HH_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT))
         response.raise_for_status(); data = response.json(); save_tokens(data["access_token"], data.get("refresh_token")); return True
     except Exception:
         logger.exception("HH authorization failed"); return False
@@ -191,7 +191,7 @@ def recover_auth(rejected_token,generation):
 
 def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retries: int = 3):
     url = endpoint if endpoint.startswith("http") else f"{HH_API_BASE}/{endpoint.lstrip('/')}"
-    max_transient_requests = max(1, int(retries) + 1)
+    max_transient_requests = min(HH_MAX_HTTP_ATTEMPTS, max(1, int(retries) + 1))
     transient_count = 0
     auth_recovery_used = not reauth
 
@@ -207,7 +207,7 @@ def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retri
             headers["Authorization"] = "Bearer " + token
         try:
             response = requests.get(
-                url, params=params, headers=headers, timeout=(10, REQUEST_TIMEOUT)
+                url, params=params, headers=headers, timeout=(HH_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT)
             )
         except (requests.ConnectionError, requests.Timeout) as exc:
             transient_count += 1
