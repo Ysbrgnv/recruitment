@@ -122,7 +122,7 @@ class FailureGuardHarness:
         self.checkpoints = []
         self.live_metrics = metrics if metrics is not None else {}
         items = copy.deepcopy(items if items is not None else [])
-        outcomes = copy.deepcopy(outcomes if outcomes is not None else {})
+        outcomes = dict(outcomes if outcomes is not None else {})
         existing_pool = copy.deepcopy(existing_pool if existing_pool is not None else [])
         pool_exclusions = copy.deepcopy(
             pool_exclusions if pool_exclusions is not None else {}
