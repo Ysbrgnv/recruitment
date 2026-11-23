@@ -147,7 +147,7 @@ def refresh_access_token() -> bool:
 @synchronized_auth
 def authorize_from_scratch() -> bool:
     if os.getenv('HH_INTERACTIVE_AUTH','false').lower()!='true':
-        raise HHUnavailableError('Интерактивная авторизация HH отключена. Настройте токены заранее.')
+        raise HHUnavailableError('Интерактивная авторизация HH отключена. Настройте токены заранее.', error_kind='auth_disabled', request_scope='auth', endpoint='/oauth/token')
     if not all([HH_CLIENT_ID, HH_CLIENT_SECRET, HH_REDIRECT_URI]): return False
     webbrowser.open(HH_AUTHORIZE_URL + "?" + urlencode({"response_type":"code", "client_id":HH_CLIENT_ID, "redirect_uri":HH_REDIRECT_URI}))
     code = input("Введите code из адресной строки HH: ").strip()
@@ -189,18 +189,44 @@ def recover_auth(rejected_token,generation):
         finally:_AUTH_LAST_TIME=time.monotonic()
         return _AUTH_LAST_RESULT
 
-def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retries: int = 3):
+def _safe_endpoint(endpoint):
+    path = str(endpoint or "").split("?", 1)[0]
+    if path == "/resumes":
+        return "/resumes"
+    if path.startswith("/resumes/") and len(path) > len("/resumes/"):
+        return "/resumes/{id}"
+    if path == "/vacancies":
+        return "/vacancies"
+    if path.startswith("/vacancies/") and len(path) > len("/vacancies/"):
+        return "/vacancies/{id}"
+    if path == "/oauth/token":
+        return "/oauth/token"
+    return None
+
+
+def _retry_after_values(raw, fallback):
+    if raw is None:
+        return fallback, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return fallback, None
+    delay = min(max(0, value), HH_MAX_RETRY_AFTER_SECONDS)
+    metadata = delay if value >= 0 else None
+    return delay, metadata
+
+
+def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retries: int = 3, *, request_scope=None):
     url = endpoint if endpoint.startswith("http") else f"{HH_API_BASE}/{endpoint.lstrip('/')}"
+    safe_endpoint = _safe_endpoint(endpoint)
     max_transient_requests = min(HH_MAX_HTTP_ATTEMPTS, max(1, int(retries) + 1))
     transient_count = 0
     auth_recovery_used = not reauth
-
     with AUTH_LOCK:
         with token_file_lock(ENV_PATH):
             reload_saved_tokens()
         token = os.getenv("HH_BEARER", "").strip()
         generation = _AUTH_GENERATION
-
     while True:
         headers = {"User-Agent": HH_USER_AGENT, "Accept": "application/json"}
         if token:
@@ -209,11 +235,13 @@ def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retri
             response = requests.get(
                 url, params=params, headers=headers, timeout=(HH_CONNECT_TIMEOUT_SECONDS, REQUEST_TIMEOUT)
             )
-        except (requests.ConnectionError, requests.Timeout) as exc:
+        except requests.Timeout as exc:
             transient_count += 1
             if transient_count >= max_transient_requests:
                 raise HHUnavailableError(
-                    "HH временно недоступен. Повторите попытку позже."
+                    "HH временно недоступен. Повторите попытку позже.",
+                    error_kind="timeout", request_scope=request_scope,
+                    endpoint=safe_endpoint,
                 ) from exc
             delay = 2 ** transient_count
             logger.warning(
@@ -222,25 +250,41 @@ def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retri
             )
             time.sleep(delay)
             continue
-
-        if response.status_code in (429, 500, 502, 503, 504):
+        except requests.ConnectionError as exc:
             transient_count += 1
             if transient_count >= max_transient_requests:
                 raise HHUnavailableError(
-                    f"HH временно недоступен: HTTP {response.status_code}."
-                )
+                    "HH временно недоступен. Повторите попытку позже.",
+                    error_kind="network_error", request_scope=request_scope,
+                    endpoint=safe_endpoint,
+                ) from exc
             delay = 2 ** transient_count
-            retry_after = response.headers.get("Retry-After")
-            if retry_after is not None:
-                try:
-                    delay = min(
-                        max(0, int(retry_after)), HH_MAX_RETRY_AFTER_SECONDS
-                    )
-                except (TypeError, ValueError):
-                    pass
+            logger.warning(
+                "Сетевая ошибка HH (%s), повтор через %sс, transient attempt %s/%s",
+                exc, delay, transient_count, max_transient_requests,
+            )
             time.sleep(delay)
             continue
-
+        if response.status_code in (429, 500, 502, 503, 504):
+            transient_count += 1
+            fallback = 2 ** transient_count
+            delay, retry_after = _retry_after_values(
+                response.headers.get("Retry-After"), fallback
+            )
+            if transient_count >= max_transient_requests:
+                raise HHUnavailableError(
+                    f"HH временно недоступен: HTTP {response.status_code}.",
+                    error_kind=(
+                        "rate_limited" if response.status_code == 429
+                        else "server_error"
+                    ),
+                    request_scope=request_scope,
+                    endpoint=safe_endpoint,
+                    status_code=response.status_code,
+                    retry_after=retry_after,
+                )
+            time.sleep(delay)
+            continue
         if response.status_code in (401, 403):
             try:
                 payload = response.json()
@@ -259,7 +303,9 @@ def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retri
             if oauth & {"token_revoked", "application_not_found"}:
                 raise HHUnavailableError(
                     "HH: доступ отозван или приложение удалено. Требуется новая авторизация; "
-                    "внесите новую пару токенов в .env и запустите START_LOCAL.ps1."
+                    "внесите новую пару токенов в .env и запустите START_LOCAL.ps1.",
+                    error_kind="auth_revoked", request_scope=request_scope,
+                    endpoint=safe_endpoint, status_code=response.status_code,
                 )
             recoverable = response.status_code == 401 or "token_expired" in oauth
             if recoverable and not auth_recovery_used:
@@ -270,24 +316,40 @@ def hh_get(endpoint: str, params: dict | None = None, reauth: bool = True, retri
                         generation = _AUTH_GENERATION
                     continue
                 raise HHUnavailableError(
-                    _AUTH_FAILURE_MESSAGE or _auth_message("unclassified")
+                    _AUTH_FAILURE_MESSAGE or _auth_message("unclassified"),
+                    error_kind="auth_failed", request_scope=request_scope,
+                    endpoint=safe_endpoint, status_code=response.status_code,
                 )
             if response.status_code == 403:
                 raise HHUnavailableError(
                     "HH вернул HTTP 403: проверьте права аккаунта, оплаченный доступ "
                     "к методу и тип авторизации. Refresh не выполнялся: истечение "
-                    "токена не подтверждено."
+                    "токена не подтверждено.",
+                    error_kind="forbidden", request_scope=request_scope,
+                    endpoint=safe_endpoint, status_code=403,
                 )
             raise HHUnavailableError(
                 "HH отклонил обновлённый access-токен. Проверьте авторизацию; "
-                "повторный refresh в этом запросе заблокирован."
+                "повторный refresh в этом запросе заблокирован.",
+                error_kind="auth_failed", request_scope=request_scope,
+                endpoint=safe_endpoint, status_code=401,
             )
-
         try:
             response.raise_for_status()
         except requests.HTTPError as exc:
+            status = response.status_code
+            if status in (404, 410):
+                kind = "not_found"
+            elif 500 <= status <= 599:
+                kind = "server_error"
+            elif 400 <= status <= 499:
+                kind = "client_error"
+            else:
+                kind = None
             raise HHUnavailableError(
-                f"HH вернул HTTP {response.status_code}."
+                f"HH вернул HTTP {status}.", error_kind=kind,
+                request_scope=request_scope, endpoint=safe_endpoint,
+                status_code=status,
             ) from exc
         return response
 
@@ -295,7 +357,7 @@ def fetch_active_vacancies(employer_id: str) -> list[dict]:
     result, page = [], 0
     while True:
         logger.info("[STARTUP] Загрузка вакансий HH: страница %s", page + 1)
-        data = hh_get("/vacancies", {"employer_id": employer_id, "per_page": 100, "page": page}).json()
+        data = hh_get("/vacancies", {"employer_id": employer_id, "per_page": 100, "page": page}, request_scope="vacancy").json()
         result.extend(data.get("items", [])); page += 1
         if page >= data.get("pages", 0):
             logger.info("[STARTUP] Вакансии загружены: %s", len(result)); return result
@@ -304,9 +366,9 @@ def fetch_vacancy_details(vacancy_id: str) -> dict:
     if not vacancy_id.isdigit(): raise ValueError("Некорректный ID вакансии")
     with STATE_LOCK: cached = APP_STATE["vacancy_cache"].get(vacancy_id)
     if cached: return cached
-    data = hh_get(f"/vacancies/{vacancy_id}").json()
+    data = hh_get(f"/vacancies/{vacancy_id}", request_scope="vacancy").json()
     with STATE_LOCK: APP_STATE["vacancy_cache"][vacancy_id] = data
     return data
 
-def search_resumes(params: dict) -> dict: return hh_get("/resumes", params).json()
-def fetch_resume_details(resume_id: str) -> dict: return hh_get(f"/resumes/{resume_id}").json()
+def search_resumes(params: dict) -> dict: return hh_get("/resumes", params, request_scope="search").json()
+def fetch_resume_details(resume_id: str) -> dict: return hh_get(f"/resumes/{resume_id}", request_scope="details").json()
