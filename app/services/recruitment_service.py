@@ -620,9 +620,181 @@ def _select_candidate_pool_version(checkpoint):
 
 def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
     import json
+    import math
     import requests
 
+    guard_key = "details_failure_guard"
+    guard_keys = {
+        "schema_version", "completed_resume_ids", "recent_outcomes",
+        "consecutive_failures", "attempts_total", "failures_total",
+        "not_found_failures", "malformed_failures", "generic_failures",
+        "trigger",
+    }
+    failure_outcomes = {"not_found", "malformed_response", "generic_error"}
+    allowed_outcomes = failure_outcomes | {"success"}
+    window = settings.CANDIDATE_POOL_V3_FAILURE_WINDOW
+    minimum_sample = settings.CANDIDATE_POOL_V3_FAILURE_MIN_SAMPLE
+    rate_threshold = settings.CANDIDATE_POOL_V3_FAILURE_RATE_THRESHOLD
+    consecutive_limit = settings.CANDIDATE_POOL_V3_CONSECUTIVE_FAILURE_LIMIT
+    guard_message = (
+        "Слишком много резюме не удалось загрузить. "
+        "Повторите попытку позже или проверьте состояние поиска."
+    )
+    malformed_state_message = (
+        "Некорректное состояние защиты Candidate Pool V3. "
+        "Требуется безопасное восстановление состояния."
+    )
+
+    def nonnegative_int(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    def malformed_state():
+        raise UserFacingError(malformed_state_message)
+
+    def validate_trigger(trigger):
+        if trigger is None:
+            return
+        expected = {
+            "kind", "consecutive_failures", "sample_size",
+            "failure_count", "failure_rate",
+        }
+        if not isinstance(trigger, dict) or set(trigger) != expected:
+            malformed_state()
+        kind = trigger["kind"]
+        consecutive = trigger["consecutive_failures"]
+        sample_size = trigger["sample_size"]
+        failure_count = trigger["failure_count"]
+        failure_rate = trigger["failure_rate"]
+        if kind not in {"consecutive", "rate"}:
+            malformed_state()
+        if not all(nonnegative_int(value) for value in (consecutive, sample_size, failure_count)):
+            malformed_state()
+        if failure_count > sample_size or sample_size > window:
+            malformed_state()
+        if (
+            not isinstance(failure_rate, (int, float))
+            or isinstance(failure_rate, bool)
+            or not 0.0 <= failure_rate <= 1.0
+        ):
+            malformed_state()
+        if sample_size:
+            if not math.isclose(
+                float(failure_rate),
+                failure_count / sample_size,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            ):
+                malformed_state()
+        elif failure_count or float(failure_rate) != 0.0:
+            malformed_state()
+        if kind == "consecutive" and consecutive < consecutive_limit:
+            malformed_state()
+        if kind == "rate" and (
+            sample_size < minimum_sample or float(failure_rate) < rate_threshold
+        ):
+            malformed_state()
+
+    def validate_guard(value):
+        if not isinstance(value, dict) or set(value) != guard_keys:
+            malformed_state()
+        if (
+            not isinstance(value["schema_version"], int)
+            or isinstance(value["schema_version"], bool)
+            or value["schema_version"] != 1
+        ):
+            malformed_state()
+        completed = value["completed_resume_ids"]
+        if (
+            not isinstance(completed, list)
+            or any(not isinstance(item, str) or not item for item in completed)
+            or len(completed) != len(set(completed))
+        ):
+            malformed_state()
+        recent = value["recent_outcomes"]
+        if (
+            not isinstance(recent, list)
+            or len(recent) > window
+            or any(item not in allowed_outcomes for item in recent)
+        ):
+            malformed_state()
+        counter_names = (
+            "consecutive_failures", "attempts_total", "failures_total",
+            "not_found_failures", "malformed_failures", "generic_failures",
+        )
+        if any(not nonnegative_int(value[name]) for name in counter_names):
+            malformed_state()
+        failures = value["failures_total"]
+        if value["attempts_total"] < failures:
+            malformed_state()
+        if failures != (
+            value["not_found_failures"]
+            + value["malformed_failures"]
+            + value["generic_failures"]
+        ):
+            malformed_state()
+        if value["consecutive_failures"] > failures:
+            malformed_state()
+        validate_trigger(value["trigger"])
+
+    def trigger_for(state):
+        sample_size = len(state["recent_outcomes"])
+        failure_count = sum(
+            outcome in failure_outcomes for outcome in state["recent_outcomes"]
+        )
+        failure_rate = failure_count / sample_size if sample_size else 0.0
+        if state["consecutive_failures"] >= consecutive_limit:
+            kind = "consecutive"
+        elif sample_size >= minimum_sample and failure_rate >= rate_threshold:
+            kind = "rate"
+        else:
+            return None
+        return {
+            "kind": kind,
+            "consecutive_failures": state["consecutive_failures"],
+            "sample_size": sample_size,
+            "failure_count": failure_count,
+            "failure_rate": failure_rate,
+        }
+
+    def append_outcome(state, outcome, resume_id):
+        state["recent_outcomes"].append(outcome)
+        if len(state["recent_outcomes"]) > window:
+            state["recent_outcomes"] = state["recent_outcomes"][-window:]
+        state["attempts_total"] += 1
+        if outcome == "success":
+            state["consecutive_failures"] = 0
+        else:
+            state["failures_total"] += 1
+            state["consecutive_failures"] += 1
+            state[{
+                "not_found": "not_found_failures",
+                "malformed_response": "malformed_failures",
+                "generic_error": "generic_failures",
+            }[outcome]] += 1
+        state["completed_resume_ids"].append(resume_id)
+
     reset_history_cache()
+    raw_guard = metrics.get(guard_key)
+    if raw_guard is None:
+        guard = {
+            "schema_version": 1,
+            "completed_resume_ids": [],
+            "recent_outcomes": [],
+            "consecutive_failures": 0,
+            "attempts_total": 0,
+            "failures_total": 0,
+            "not_found_failures": 0,
+            "malformed_failures": 0,
+            "generic_failures": 0,
+            "trigger": None,
+        }
+    else:
+        validate_guard(raw_guard)
+        guard = copy.deepcopy(raw_guard)
+    metrics[guard_key] = guard
+    if guard["trigger"] is not None:
+        raise UserFacingError(guard_message)
+
     candidates = copy.deepcopy(list(existing_pool or []))
     exclusions = copy.deepcopy(pool_exclusions) if isinstance(pool_exclusions, dict) else {}
     seen = {
@@ -631,6 +803,11 @@ def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_p
         if candidate and normalize(candidate[0])
     }
     seen.update(normalize(resume_id) for resume_id in exclusions if normalize(resume_id))
+    seen.update(
+        normalize(resume_id)
+        for resume_id in guard["completed_resume_ids"]
+        if normalize(resume_id)
+    )
     for key in (
         "search_items_seen", "unique_resume_ids_seen", "scanned_new_candidates",
         "duplicates_skipped", "blocked_by_ai_history", "invalid_resume_id",
@@ -695,19 +872,41 @@ def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_p
                     getattr(exc, "request_scope", None) == "details"
                     and getattr(exc, "error_kind", None) in {"not_found", "malformed_response"}
                 ):
+                    outcome = getattr(exc, "error_kind")
+                    append_outcome(guard, outcome, resume_id)
                     metrics["load_failed"] += 1
+                    guard["trigger"] = trigger_for(guard)
                     logger.warning("Не удалось загрузить резюме %s: структурированная ошибка HH", resume_id)
                     if checkpoint: checkpoint(candidates, metrics, exclusions)
+                    if guard["trigger"] is not None:
+                        raise UserFacingError(guard_message)
                     continue
                 raise
             except Exception:
+                append_outcome(guard, "generic_error", resume_id)
                 metrics["load_failed"] += 1
+                guard["trigger"] = trigger_for(guard)
                 logger.exception("Не удалось загрузить резюме %s", resume_id)
                 if checkpoint: checkpoint(candidates, metrics, exclusions)
+                if guard["trigger"] is not None:
+                    raise UserFacingError(guard_message)
                 continue
             resume = copy.deepcopy(loaded)
+            append_outcome(guard, "success", resume_id)
             candidates.append((resume_id, resume, []))
+            if len(candidates) >= target_pool:
+                guard["trigger"] = None
+                metrics["stop_reason"] = "target_pool_reached"
+                if checkpoint: checkpoint(candidates, metrics, exclusions)
+                return {
+                    "pool": candidates, "pool_complete": True,
+                    "stop_reason": "target_pool_reached", "metrics": metrics,
+                    "pool_exclusions": exclusions,
+                }
+            guard["trigger"] = trigger_for(guard)
             if checkpoint: checkpoint(candidates, metrics, exclusions)
+            if guard["trigger"] is not None:
+                raise UserFacingError(guard_message)
         if stop_reason is None:
             if len(candidates) >= target_pool: stop_reason = "target_pool_reached"
             elif metrics["scanned_new_candidates"] >= scan_limit: stop_reason = "scan_limit_reached"
