@@ -57,6 +57,28 @@ def _state(**overrides):
     return value
 
 
+def _consistent_rate_state():
+    return _state(
+        completed_resume_ids=[f"r{index}" for index in range(10)],
+        recent_outcomes=[
+            "generic_error", "success", "generic_error", "success",
+            "generic_error", "success", "generic_error", "success",
+            "generic_error", "success",
+        ],
+        consecutive_failures=0,
+        attempts_total=10,
+        failures_total=5,
+        generic_failures=5,
+        trigger={
+            "kind": "rate",
+            "consecutive_failures": 0,
+            "sample_size": 10,
+            "failure_count": 5,
+            "failure_rate": 0.5,
+        },
+    )
+
+
 class _MissingGuard(dict):
     def __init__(self):
         super().__init__(
@@ -115,6 +137,7 @@ class FailureGuardHarness:
         rate_threshold=0.50,
         consecutive_limit=5,
         checkpoint_callback=None,
+        use_checkpoint=True,
     ):
         self.search_calls = []
         self.details_calls = []
@@ -188,7 +211,7 @@ class FailureGuardHarness:
                 progress,
                 pool_exclusions=pool_exclusions,
                 existing_pool=existing_pool,
-                checkpoint=checkpoint,
+                checkpoint=checkpoint if use_checkpoint else None,
                 plan=None,
             )
         return result
@@ -769,6 +792,112 @@ class FailureGuardPrecedenceTests(FailureGuardHarness, unittest.TestCase):
         self.assertNotIn("stop_reason", snapshot_metrics)
         for reason in ("search_exhausted", "page_limit_reached", "scan_limit_reached"):
             self.assertNotEqual(snapshot_metrics.get("stop_reason"), reason)
+
+
+class FailureGuardReviewCorrectionTests(FailureGuardHarness, unittest.TestCase):
+    def assert_malformed_guard_rejected(self, state, label):
+        metrics = {GUARD_KEY: state}
+        before = copy.deepcopy(state)
+        with self.subTest(case=label):
+            exc = expect_guard_error(
+                self,
+                lambda: self.invoke(items=[{"id": "must-not-run"}], metrics=metrics),
+            )
+            self.assertIn("состояние защиты", str(exc).casefold())
+            self.assertNotIn(
+                "слишком много резюме не удалось загрузить",
+                str(exc).casefold(),
+            )
+            self.assertEqual(self.search_calls, [])
+            self.assertEqual(self.details_calls, [])
+            self.assertEqual(self.checkpoints, [])
+            self.assertEqual(metrics[GUARD_KEY], before)
+
+    def test_explicit_none_guard_state_fails_closed(self):
+        missing_metrics = {}
+        missing_result = self.invoke(items=[], metrics=missing_metrics)
+        self.assertIsInstance(missing_result, dict)
+        self.assertEqual(missing_metrics[GUARD_KEY]["schema_version"], 1)
+
+        metrics = {GUARD_KEY: None}
+        exc = expect_guard_error(
+            self,
+            lambda: self.invoke(items=[{"id": "resume-sensitive-id"}], metrics=metrics),
+        )
+        self.assertIn("состояние защиты", str(exc).casefold())
+        for secret in (
+            '"approved query"',
+            "resume-sensitive-id",
+            "https://example.invalid/resume",
+            "synthetic-token",
+            "None",
+        ):
+            self.assertNotIn(secret, str(exc))
+        self.assertEqual(self.search_calls, [])
+        self.assertEqual(self.details_calls, [])
+        self.assertEqual(self.checkpoints, [])
+        self.assertIsNone(metrics[GUARD_KEY])
+
+    def test_rehydrated_trigger_rejects_consecutive_mismatch(self):
+        state = _consistent_rate_state()
+        state["trigger"]["consecutive_failures"] = 1
+        self.assert_malformed_guard_rejected(state, "consecutive_failures")
+
+    def test_rehydrated_trigger_rejects_sample_size_mismatch(self):
+        state = _consistent_rate_state()
+        state["trigger"].update(
+            sample_size=20,
+            failure_count=10,
+            failure_rate=0.5,
+        )
+        self.assert_malformed_guard_rejected(state, "sample_size")
+
+    def test_rehydrated_trigger_rejects_failure_count_and_rate_mismatch(self):
+        state = _consistent_rate_state()
+        state["trigger"].update(failure_count=6, failure_rate=0.6)
+        self.assert_malformed_guard_rejected(state, "failure_count_and_rate")
+
+    def test_valid_rehydrated_trigger_short_circuits_without_traversal(self):
+        state = _consistent_rate_state()
+        metrics = {GUARD_KEY: state}
+        before = copy.deepcopy(state)
+        exc = expect_guard_error(
+            self,
+            lambda: self.invoke(items=[{"id": "must-not-run"}], metrics=metrics),
+        )
+        self.assertIn(
+            "слишком много резюме не удалось загрузить",
+            str(exc).casefold(),
+        )
+        self.assertEqual(self.search_calls, [])
+        self.assertEqual(self.details_calls, [])
+        self.assertEqual(self.checkpoints, [])
+        self.assertEqual(metrics[GUARD_KEY], before)
+        self.assertIsNot(metrics[GUARD_KEY], state)
+
+    def test_guard_triggers_without_checkpoint_callback(self):
+        items = [{"id": f"f{index}"} for index in range(6)]
+        outcomes = {
+            item["id"]: RuntimeError("ordinary details failure")
+            for item in items
+        }
+        exc = expect_guard_error(
+            self,
+            lambda: self.invoke(
+                items=items,
+                outcomes=outcomes,
+                use_checkpoint=False,
+            ),
+        )
+        self.assertIn(
+            "слишком много резюме не удалось загрузить",
+            str(exc).casefold(),
+        )
+        self.assertEqual(self.details_calls, ["f0", "f1", "f2", "f3", "f4"])
+        self.assertEqual(self.checkpoints, [])
+        state = _guard(self.live_metrics)
+        self.assertEqual(state["consecutive_failures"], 5)
+        self.assertEqual(state["trigger"]["kind"], "consecutive")
 
 
 if __name__ == "__main__":
