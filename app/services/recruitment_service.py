@@ -734,7 +734,31 @@ def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_p
             malformed_state()
         if value["consecutive_failures"] > failures:
             malformed_state()
-        validate_trigger(value["trigger"])
+        trigger = value["trigger"]
+        validate_trigger(trigger)
+        if trigger is not None:
+            actual_consecutive_failures = value["consecutive_failures"]
+            actual_sample_size = len(recent)
+            actual_failure_count = sum(
+                outcome in failure_outcomes for outcome in recent
+            )
+            actual_failure_rate = (
+                actual_failure_count / actual_sample_size
+                if actual_sample_size
+                else 0.0
+            )
+            if (
+                trigger["consecutive_failures"] != actual_consecutive_failures
+                or trigger["sample_size"] != actual_sample_size
+                or trigger["failure_count"] != actual_failure_count
+                or not math.isclose(
+                    float(trigger["failure_rate"]),
+                    actual_failure_rate,
+                    rel_tol=1e-9,
+                    abs_tol=1e-12,
+                )
+            ):
+                malformed_state()
 
     def trigger_for(state):
         sample_size = len(state["recent_outcomes"])
@@ -774,8 +798,7 @@ def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_p
         state["completed_resume_ids"].append(resume_id)
 
     reset_history_cache()
-    raw_guard = metrics.get(guard_key)
-    if raw_guard is None:
+    if guard_key not in metrics:
         guard = {
             "schema_version": 1,
             "completed_resume_ids": [],
@@ -789,6 +812,7 @@ def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_p
             "trigger": None,
         }
     else:
+        raw_guard = metrics[guard_key]
         validate_guard(raw_guard)
         guard = copy.deepcopy(raw_guard)
     metrics[guard_key] = guard
