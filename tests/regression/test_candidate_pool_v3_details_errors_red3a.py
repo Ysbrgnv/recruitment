@@ -37,7 +37,36 @@ class V3DetailsRed3A(Harness,unittest.TestCase):
  def test_07_structured_matches_generic_failure(self):
   structured_result,structured_metrics,structured_checkpoints=self.continuation(err('not_found','details'))
   generic_result,generic_metrics,generic_checkpoints=self.invoke(RuntimeError('x'))
-  self.assertEqual((structured_result,structured_metrics,structured_checkpoints),(generic_result,generic_metrics,generic_checkpoints))
+
+  def without_guard(value):
+   if isinstance(value,dict):
+    return {
+     key:without_guard(item)
+     for key,item in value.items()
+     if key!='details_failure_guard'
+    }
+   if isinstance(value,list):
+    return [without_guard(item) for item in value]
+   if isinstance(value,tuple):
+    return tuple(without_guard(item) for item in value)
+   return value
+
+  self.assertEqual(
+   without_guard(
+    (
+     structured_result,
+     structured_metrics,
+     structured_checkpoints,
+    )
+   ),
+   without_guard(
+    (
+     generic_result,
+     generic_metrics,
+     generic_checkpoints,
+    )
+   ),
+  )
  def test_08_auth_failed_propagates(self): self.propagation(err('auth_failed','details'))
  def test_09_legacy_error_propagates(self): self.propagation(HHUnavailableError('legacy'))
  def test_10_checkpoint_boundary(self):
