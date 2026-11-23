@@ -14,7 +14,7 @@ from app.core.settings import (
     SEARCH_MAX_PAGES, SEARCH_PER_PAGE, SEARCH_SCAN_LIMIT,
     validate_nano_settings,
 )
-from app.persistence.tracking_service import reset_history_cache, was_sent_to_ai
+from app.persistence.tracking_service import normalize, reset_history_cache, was_sent_to_ai
 
 logger = logging.getLogger(__name__)
 ROLE_STOP_WORDS = {
@@ -620,13 +620,125 @@ def _select_candidate_pool_version(checkpoint):
 
 def _search_candidate_pool_v3(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
     reset_history_cache()
-    params = {"text": query, "per_page": SEARCH_PER_PAGE, "page": 0}
-    search_resumes(params)
+    candidates = copy.deepcopy(list(existing_pool or []))
+    exclusions = copy.deepcopy(pool_exclusions) if isinstance(pool_exclusions, dict) else {}
+    seen = {
+        normalize(candidate[0])
+        for candidate in candidates
+        if candidate and normalize(candidate[0])
+    }
+    seen.update(normalize(resume_id) for resume_id in exclusions if normalize(resume_id))
+    for key in (
+        "search_items_seen",
+        "unique_resume_ids_seen",
+        "scanned_new_candidates",
+        "duplicates_skipped",
+        "blocked_by_ai_history",
+        "invalid_resume_id",
+        "load_failed",
+        "pages_fetched",
+    ):
+        metrics.setdefault(key, 0)
+
+    max_pages = settings.CANDIDATE_POOL_V3_MAX_PAGES
+    scan_limit = settings.CANDIDATE_POOL_V3_SCAN_LIMIT
+    stop_reason = None
+    page = 0
+
+    while page < max_pages:
+        if len(candidates) >= target_pool:
+            stop_reason = "target_pool_reached"
+            break
+        if metrics["scanned_new_candidates"] >= scan_limit:
+            stop_reason = "scan_limit_reached"
+            break
+
+        data = search_resumes({
+            "text": query,
+            "per_page": SEARCH_PER_PAGE,
+            "page": page,
+        })
+        items = data.get("items", [])
+        pages = data.get("pages", 0)
+        metrics["pages_fetched"] += 1
+        progress(
+            "search",
+            f"Поиск HH: страница {page + 1}",
+            _progress_payload(metrics, target_pool, requested_count),
+        )
+
+        for item in items:
+            if len(candidates) >= target_pool:
+                stop_reason = "target_pool_reached"
+                break
+            if metrics["scanned_new_candidates"] >= scan_limit:
+                stop_reason = "scan_limit_reached"
+                break
+
+            metrics["search_items_seen"] += 1
+            resume_id = normalize(item.get("id") if isinstance(item, dict) else None)
+            if not resume_id:
+                metrics["invalid_resume_id"] += 1
+                continue
+            if resume_id in seen:
+                metrics["duplicates_skipped"] += 1
+                continue
+
+            seen.add(resume_id)
+            metrics["unique_resume_ids_seen"] += 1
+            if was_sent_to_ai(resume_id, vacancy_id):
+                metrics["blocked_by_ai_history"] += 1
+                continue
+
+            metrics["scanned_new_candidates"] += 1
+            try:
+                loaded = fetch_resume_details(resume_id)
+            except HHUnavailableError:
+                raise
+            except Exception:
+                metrics["load_failed"] += 1
+                logger.exception("Не удалось загрузить резюме %s", resume_id)
+                if checkpoint:
+                    checkpoint(candidates, metrics, exclusions)
+                continue
+
+            resume = copy.deepcopy(loaded)
+            candidates.append((resume_id, resume, []))
+            if checkpoint:
+                checkpoint(candidates, metrics, exclusions)
+
+        if stop_reason is None:
+            if len(candidates) >= target_pool:
+                stop_reason = "target_pool_reached"
+            elif metrics["scanned_new_candidates"] >= scan_limit:
+                stop_reason = "scan_limit_reached"
+        if stop_reason is not None:
+            break
+
+        if checkpoint:
+            checkpoint(candidates, metrics, exclusions)
+        page += 1
+        if page >= pages:
+            stop_reason = "search_exhausted"
+            break
+
+    if stop_reason is None:
+        if len(candidates) >= target_pool:
+            stop_reason = "target_pool_reached"
+        elif metrics["scanned_new_candidates"] >= scan_limit:
+            stop_reason = "scan_limit_reached"
+        else:
+            stop_reason = "page_limit_reached"
+
+    metrics["stop_reason"] = stop_reason
+    if checkpoint:
+        checkpoint(candidates, metrics, exclusions)
     return {
-        "pool": [],
-        "pool_complete": False,
-        "stop_reason": "system_error",
-        "implementation_state": "green1_stub",
+        "pool": candidates,
+        "pool_complete": True,
+        "stop_reason": stop_reason,
+        "metrics": metrics,
+        "pool_exclusions": exclusions,
     }
 
 def _search_candidate_pool(vacancy_id, vacancy, requirements, query, target_pool, requested_count, metrics, progress, profile=None, pool_exclusions=None, existing_pool=None, checkpoint=None, plan=None):
